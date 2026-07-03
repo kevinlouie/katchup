@@ -253,6 +253,24 @@ func (s *Store) UpdateSyncRunStatus(ctx context.Context, runID int64, emailsBack
 	return toSyncRun(run), nil
 }
 
+// MarkSyncRunProgress records incremental progress (emails written so far and
+// the current watermark) on an in-flight run without ending it.
+func (s *Store) MarkSyncRunProgress(ctx context.Context, runID, emailsBackedUp, lastUid int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var uidVal sql.NullInt64
+	if lastUid > 0 {
+		uidVal = sql.NullInt64{Int64: lastUid, Valid: true}
+	}
+
+	return s.queries.MarkSyncRunProgress(ctx, database.MarkSyncRunProgressParams{
+		EmailsBackedUp: emailsBackedUp,
+		LastUid:        uidVal,
+		ID:             runID,
+	})
+}
+
 // UpdateSyncRunFolderLastUID sets the per-folder last UID for a completed run.
 func (s *Store) UpdateSyncRunFolderLastUID(ctx context.Context, runID int64, folder string, folderLastUID int64) error {
 	s.mu.Lock()

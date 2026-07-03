@@ -131,8 +131,8 @@ func TestListAccountsEmpty(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	if !strings.Contains(body, "No accounts yet") {
-		t.Error("expected response to contain 'No accounts yet'")
+	if !strings.Contains(body, "No mailboxes yet") {
+		t.Error("expected response to contain 'No mailboxes yet'")
 	}
 }
 

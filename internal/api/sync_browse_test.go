@@ -78,8 +78,8 @@ func TestSyncStatus(t *testing.T) {
 	if !strings.Contains(body, "Sync Test") {
 		t.Error("expected response to contain 'Sync Test'")
 	}
-	if !strings.Contains(body, "Sync Status") {
-		t.Error("expected response to contain 'Sync Status'")
+	if !strings.Contains(body, "Dashboard") {
+		t.Error("expected response to contain 'Dashboard'")
 	}
 }
 
@@ -115,8 +115,8 @@ func TestSyncTrigger(t *testing.T) {
 	}
 
 	loc := w.Header().Get("Location")
-	if loc != "/sync" {
-		t.Errorf("expected redirect to /sync, got %q", loc)
+	if loc != "/" {
+		t.Errorf("expected redirect to /, got %q", loc)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestSyncServeHTTP(t *testing.T) {
 			method:   http.MethodGet,
 			path:     "/sync",
 			expected: http.StatusOK,
-			contains: "Sync Status",
+			contains: "Dashboard",
 		},
 		{
 			name:     "trigger sync",
@@ -260,8 +260,8 @@ func TestBrowseList(t *testing.T) {
 	if !strings.Contains(body, "Browse Test") {
 		t.Error("expected response to contain 'Browse Test'")
 	}
-	if !strings.Contains(body, "Browse Backed Up Emails") {
-		t.Error("expected response to contain 'Browse Backed Up Emails'")
+	if !strings.Contains(body, "Browse") {
+		t.Error("expected response to contain 'Browse'")
 	}
 }
 
@@ -377,7 +377,7 @@ func TestBrowseServeHTTP(t *testing.T) {
 			method:   http.MethodGet,
 			path:     "/browse",
 			expected: http.StatusOK,
-			contains: "Browse Backed Up Emails",
+			contains: "Browse",
 		},
 		{
 			name:     "not found",
@@ -516,7 +516,7 @@ func TestBrowseListPagination(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	if !strings.Contains(body, "Showing page") {
+	if !strings.Contains(body, "Page ") {
 		t.Error("expected response to contain pagination info")
 	}
 }

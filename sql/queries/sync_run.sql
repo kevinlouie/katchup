@@ -13,6 +13,12 @@ UPDATE sync_runs SET
 WHERE id = ?5
 RETURNING id, account_id, started_at, finished_at, emails_backed_up, errors, status, last_uid, created_at;
 
+-- name: MarkSyncRunProgress :exec
+UPDATE sync_runs SET
+    emails_backed_up = ?1,
+    last_uid = ?2
+WHERE id = ?3;
+
 -- name: ListRecentRuns :many
 SELECT id, account_id, started_at, finished_at, emails_backed_up, errors, status, last_uid, created_at
 FROM sync_runs
