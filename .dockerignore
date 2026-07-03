@@ -1,0 +1,33 @@
+# Build artifacts
+bin/
+
+# Data files
+data/
+*.eml
+*.eml.enc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Ralph
+.ralph/
+
+# Docker
+docker-compose.yml
+Dockerfile
+
+# Documentation
+README.md
+LICENSE
+
+# Test
+coverage.out

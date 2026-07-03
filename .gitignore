@@ -1,0 +1,15 @@
+# Build artifacts
+bin/
+
+# Data files
+data/
+*.eml
+*.eml.enc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

@@ -1,0 +1,239 @@
+package browse
+
+import (
+	"context"
+	"fmt"
+	"io"
+
+	"github.com/a-h/templ"
+)
+
+type PageData struct {
+	Title     string
+	Accounts  []AccountView
+	Emails    []EmailView
+	AccountID int64
+	Date      string
+	Page      int
+	PerPage   int
+	Total     int
+}
+
+type AccountView struct {
+	ID     int64
+	Name   string
+	Emails int64
+}
+
+type EmailView struct {
+	Date      string
+	Filename  string
+	Folder    string
+	Size      int64
+	AccountID int64
+}
+
+func BrowsePage(data PageData) templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, err := fmt.Fprintf(w, `<nav class="bg-white shadow">
+	<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+		<div class="flex justify-between h-16">
+			<div class="flex">
+				<div class="shrink-0 flex items-center">
+					<span class="text-xl font-bold text-gray-800">Katchup</span>
+				</div>
+				<div class="ml-6 flex space-x-4 self-center">
+					<a href="/accounts" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Accounts</a>
+					<a href="/sync" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Sync</a>
+					<a href="/browse" class="text-gray-900 inline-flex items-center px-1 pt-1 border-b-2 border-indigo-500 text-sm font-medium">Browse</a>
+				</div>
+			</div>
+		</div>
+	</div>
+</nav>
+<main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+	<div class="px-4 py-6 sm:px-0">
+		<h2 class="text-lg leading-6 font-medium text-gray-900 mb-4">Browse Backed Up Emails</h2>
+`)
+		if err != nil {
+			return err
+		}
+
+		// Filters
+		_, err = fmt.Fprintf(w, `		<form method="GET" action="/browse" class="mb-6 bg-white shadow sm:rounded-lg">
+			<div class="px-4 py-3 sm:px-6 grid grid-cols-3 gap-4">
+				<div>
+					<label for="account" class="block text-sm font-medium text-gray-700">Account</label>
+					<select name="account" id="account" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+						<option value="">All accounts</option>
+`)
+		if err != nil {
+			return err
+		}
+
+		for _, acct := range data.Accounts {
+			selected := ""
+			if acct.ID == data.AccountID {
+				selected = " selected"
+			}
+			_, err = fmt.Fprintf(w, `						<option value="%d"%s>%s (%d)</option>
+`, acct.ID, selected, acct.Name, acct.Emails)
+			if err != nil {
+				return err
+			}
+		}
+
+		_, err = fmt.Fprintf(w, `					</select>
+				</div>
+				<div>
+					<label for="date" class="block text-sm font-medium text-gray-700">Date</label>
+					<input type="date" name="date" id="date" value="%s" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+				</div>
+				<div class="flex items-end">
+					<button type="submit" class="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">Filter</button>
+				</div>
+			</div>
+		</form>
+`)
+		if err != nil {
+			return err
+		}
+
+		if len(data.Emails) == 0 {
+			_, err = fmt.Fprint(w, `		<div class="text-center py-12 bg-white shadow sm:rounded-lg">
+			<h3 class="mt-2 text-sm font-medium text-gray-900">No emails found</h3>
+			<p class="mt-1 text-sm text-gray-500">No backed up emails match your filters.</p>
+		</div>
+`)
+			return err
+		}
+
+		// Email list
+		_, err = fmt.Fprintf(w, `		<div class="bg-white shadow sm:rounded-lg">
+			<table class="min-w-full divide-y divide-gray-200">
+				<thead class="bg-gray-50">
+					<tr>
+						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folder</th>
+						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UID</th>
+						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+					</tr>
+				</thead>
+				<tbody class="bg-white divide-y divide-gray-200">
+`)
+		if err != nil {
+			return err
+		}
+
+		for _, email := range data.Emails {
+			_, err = fmt.Fprintf(w, `					<tr>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">%s</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%s</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%s</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%s</td>
+						<td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+							<a href="/browse/%d/%s/%s" class="text-indigo-600 hover:text-indigo-900">Download</a>
+						</td>
+					</tr>
+`)
+			if err != nil {
+				return err
+			}
+		}
+
+		_, err = fmt.Fprintf(w, `				</tbody>
+			</table>
+`)
+		if err != nil {
+			return err
+		}
+
+		// Pagination
+		if data.Total > data.PerPage {
+			_, err = fmt.Fprintf(w, `			<div class="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+				<div class="flex-1 flex justify-between sm:hidden">
+					<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">Previous</a>
+					<a href="/browse?account=%d&date=%s&page=%d" class="ml-3 relative inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">Next</a>
+				</div>
+				<div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+					<div>
+						<p class="text-sm text-gray-700">
+							Showing page <strong>%d</strong> of <strong>%d</strong>
+						</p>
+					</div>
+					<div>
+						<nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+`)
+			if err != nil {
+				return err
+			}
+
+			prevPage := data.Page - 1
+			if prevPage < 1 {
+				prevPage = 1
+			}
+			nextPage := data.Page + 1
+
+			if data.Page > 1 {
+				_, err = fmt.Fprintf(w, `							<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50">Previous</a>
+`, data.AccountID, data.Date, prevPage)
+				if err != nil {
+					return err
+				}
+			}
+
+			totalPages := (data.Total + data.PerPage - 1) / data.PerPage
+			startPage := data.Page - 2
+			if startPage < 1 {
+				startPage = 1
+			}
+			endPage := startPage + 4
+			if endPage > totalPages {
+				endPage = totalPages
+			}
+			if endPage-startPage < 4 {
+				startPage = endPage - 4
+				if startPage < 1 {
+					startPage = 1
+				}
+			}
+
+			for p := startPage; p <= endPage; p++ {
+				active := ""
+				if p == data.Page {
+					active = "bg-indigo-50 border-indigo-500 text-indigo-600"
+				} else {
+					active = "bg-white border-gray-300 text-gray-500 hover:bg-gray-50"
+				}
+				_, err = fmt.Fprintf(w, `							<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-4 py-2 border %s text-sm font-medium">%d</a>
+`, data.AccountID, data.Date, p, active, p)
+				if err != nil {
+					return err
+				}
+			}
+
+			if data.Page < totalPages {
+				_, err = fmt.Fprintf(w, `							<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50">Next</a>
+`, data.AccountID, data.Date, nextPage)
+				if err != nil {
+					return err
+				}
+			}
+
+			_, err = fmt.Fprintf(w, `						</nav>
+					</div>
+				</div>
+			</div>
+`)
+			if err != nil {
+				return err
+			}
+		}
+
+		_, err = fmt.Fprintf(w, `		</div>
+	</div>
+</main>`)
+		return err
+	})
+}

@@ -1,0 +1,19 @@
+# Katchup Configuration
+
+## Project Settings
+RALPH_PROJECT_NAME="Katchup"
+RALPH_PROJECT_TYPE="go"
+RALPH_MAX_LOOPS=100
+RALPH_API_LIMIT=100
+RALPH_LOOP_TIMEOUT=120
+
+## Tool Permissions
+ALLOWED_TOOLS=Bash(go build *),Bash(go test *),Bash(sqlc generate),Bash(templ generate),Bash(go mod tidy),Bash(docker compose *),Read,Edit,Bash(make *),Grep,Glob,Write
+
+## Sprints
+CURRENT_SPRINT="S6"
+SPRINT_ORDER="S1,S2,S3,S4,S5,S6"
+
+## Completion Criteria
+COMPLETION_INDICATORS=2
+EXIT_SIGNAL_REQUIRED=true
