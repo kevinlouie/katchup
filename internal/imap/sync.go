@@ -275,7 +275,11 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	// at one batch, each batch has its own timeout, and progress is persisted
 	// after every batch so an interrupted sync resumes from a watermark
 	// instead of restarting from zero.
-	fetchItems := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, "RFC822"}
+	// BODY.PEEK[] fetches the full message WITHOUT setting the \Seen flag, so
+	// backing up never changes read/unread state on the server. Plain RFC822
+	// (== BODY[]) would mark every fetched message as read.
+	bodySection := &imap.BodySectionName{Peek: true}
+	fetchItems := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, bodySection.FetchItem()}
 
 	// The watermark must only advance over UIDs that were written
 	// successfully: track the highest success and the lowest failure.
