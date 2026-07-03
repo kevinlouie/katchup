@@ -189,7 +189,6 @@ func FormPage(data PageData) templ.Component {
 				</div>
 			</div>
 			<div>%s<input type="text" name="folders" id="folders" value="%s" placeholder="INBOX, Sent, Archive" class="%s"><p class="mt-1.5 text-xs text-mute">Comma-separated folder names. Defaults to INBOX.</p></div>
-			<div>%s<select name="slot" id="slot" class="%s"><option value="9a">9a (primary)</option><option value="9b">9b</option><option value="9c">9c</option><option value="9d">9d</option></select></div>
 			<div class="flex items-center justify-end gap-3 border-t border-white/10 pt-5">
 				<a href="/accounts" class="rounded-xl border border-white/10 px-4 py-2.5 text-sm font-medium text-zinc-300 transition hover:bg-white/5">Cancel</a>
 				<button type="submit" class="inline-flex items-center gap-2 rounded-xl bg-ketchup px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ketchup/25 transition hover:bg-ketchup-600 hover:shadow-ketchup/40">%s</button>
@@ -203,7 +202,6 @@ func FormPage(data PageData) templ.Component {
 			label("password", "Password"), passRequired, passPlaceholder, inputCls,
 			sslChecked, starttlsChecked,
 			label("folders", "Folders"), html.EscapeString(folders), inputCls,
-			label("slot", "YubiKey slot"), inputCls,
 			buttonLabel)
 
 		_, err := io.WriteString(w, b.String())
