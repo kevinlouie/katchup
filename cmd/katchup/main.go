@@ -114,6 +114,10 @@ func main() {
 	// Register health endpoint
 	mux.HandleFunc("GET /health", healthHandler)
 
+	// Root path renders the dashboard (sync status overview).
+	syncHandler := api.NewSyncHandler(store, syncer)
+	mux.HandleFunc("GET /{$}", syncHandler.Status)
+
 	// Register account handlers
 	acctHandler := api.NewAccountHandler(store)
 	mux.Handle("/accounts", acctHandler)
@@ -122,7 +126,6 @@ func main() {
 	mux.Handle("/accounts/{id}/delete", acctHandler)
 
 	// Register sync handlers
-	syncHandler := api.NewSyncHandler(store, syncer)
 	mux.Handle("/sync", syncHandler)
 	mux.Handle("/sync/{id}/trigger", syncHandler)
 

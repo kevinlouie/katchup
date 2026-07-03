@@ -3,15 +3,17 @@
 // templ: version: v0.3.1020
 package sync
 
-//lint:file-ignore SA4006 This context is only used if a nested component is present.
-
-import "github.com/a-h/templ"
-import templruntime "github.com/a-h/templ/runtime"
-
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
+	"strconv"
+	"strings"
+
+	"katchup/internal/view/layout"
+
+	"github.com/a-h/templ"
 )
 
 type PageData struct {
@@ -43,200 +45,184 @@ type SyncRunView struct {
 	LastUID        string
 }
 
-func StatusPage(data PageData) templ.Component {
-	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, err := fmt.Fprintf(w, `<nav class="bg-white shadow">
-	<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-		<div class="flex justify-between h-16">
-			<div class="flex">
-				<div class="shrink-0 flex items-center">
-					<span class="text-xl font-bold text-gray-800">Katchup</span>
-				</div>
-				<div class="ml-6 flex space-x-4 self-center">
-					<a href="/accounts" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Accounts</a>
-					<a href="/sync" class="text-gray-900 inline-flex items-center px-1 pt-1 border-b-2 border-indigo-500 text-sm font-medium">Sync</a>
-					<a href="/browse" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Browse</a>
-				</div>
-			</div>
-			<div class="flex items-center">
-				<button id="refresh-btn" onclick="location.reload()" class="text-gray-600 hover:text-gray-900 inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md">
-					Refresh
-				</button>
-			</div>
-		</div>
-	</div>
-</nav>
-<main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-	<div class="px-4 py-6 sm:px-0">
-		<h2 class="text-lg leading-6 font-medium text-gray-900 mb-4">Sync Status</h2>
-`)
-		if err != nil {
-			return err
+// commas groups an integer with thousands separators.
+func commas(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
 		}
+		out = append(out, c)
+	}
+	if neg {
+		return "-" + string(out)
+	}
+	return string(out)
+}
+
+func statPill(dot, tone, label, live string) string {
+	return fmt.Sprintf(`<span class="inline-flex items-center gap-2 rounded-full bg-white/5 px-3 py-1 text-xs font-medium %s"><span class="h-1.5 w-1.5 rounded-full %s%s"></span>%s</span>`, tone, dot, live, label)
+}
+
+func StatusPage(data PageData) templ.Component {
+	inner := templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		var b strings.Builder
+
+		var totalEmails int64
+		syncingNow := 0
+		lastSync := ""
+		for _, a := range data.Accounts {
+			totalEmails += a.EmailsBackedUp
+			if a.IsSyncing {
+				syncingNow++
+			}
+			if a.LastSyncAt > lastSync {
+				lastSync = a.LastSyncAt
+			}
+		}
+		lastSyncDisplay := lastSync
+		if lastSyncDisplay == "" {
+			lastSyncDisplay = "—"
+		}
+
+		b.WriteString(`<div class="rise">`)
+		b.WriteString(layout.PageHeader("Overview", "Dashboard", "Live status of every mailbox katchup is archiving.",
+			`<button onclick="location.reload()" class="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-2.5 text-sm font-medium text-zinc-300 transition hover:border-white/20 hover:bg-white/5 hover:text-white"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>Refresh</button>`))
+
+		kpi := func(label, value, accent string) string {
+			return fmt.Sprintf(`<div class="rounded-2xl border border-white/10 bg-ink-900/60 p-5 transition hover:border-white/20">
+				<p class="font-mono text-[11px] uppercase tracking-widest text-mute">%s</p>
+				<p class="mt-2 font-display text-3xl font-semibold tabular-nums %s">%s</p>
+			</div>`, label, accent, value)
+		}
+		syncingVal, syncingAccent := "Idle", "text-white"
+		if syncingNow > 0 {
+			syncingVal, syncingAccent = fmt.Sprintf("%d running", syncingNow), "text-emerald-300"
+		}
+		b.WriteString(`<div class="grid grid-cols-2 gap-4 lg:grid-cols-4">`)
+		b.WriteString(kpi("Mailboxes", commas(int64(len(data.Accounts))), "text-white"))
+		b.WriteString(kpi("Emails archived", commas(totalEmails), "text-ketchup"))
+		b.WriteString(kpi("Activity", syncingVal, syncingAccent))
+		b.WriteString(kpi("Last sync", `<span class="font-mono text-lg font-medium">`+html.EscapeString(lastSyncDisplay)+`</span>`, "text-zinc-200"))
+		b.WriteString(`</div>`)
 
 		if len(data.Accounts) == 0 {
-			_, err := fmt.Fprint(w, `		<div class="text-center py-12">
-			<h3 class="mt-2 text-sm font-medium text-gray-900">No accounts yet</h3>
-			<p class="mt-1 text-sm text-gray-500">Add an email account to start syncing.</p>
-			<div class="mt-6">
-				<a href="/accounts/new" class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">Add Account</a>
-			</div>
-		</div>`)
+			b.WriteString(`<div class="mt-8 rounded-2xl border border-dashed border-white/12 bg-ink-900/40 px-6 py-20 text-center">
+				<div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-ketchup/10 text-2xl ring-1 ring-inset ring-ketchup/25">🥫</div>
+				<h3 class="font-display text-lg font-semibold text-white">Nothing to archive yet</h3>
+				<p class="mx-auto mt-1 max-w-sm text-sm text-mute">Add an IMAP mailbox and katchup will start backing up your email automatically.</p>
+				<a href="/accounts/new" class="mt-6 inline-flex items-center gap-2 rounded-xl bg-ketchup px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ketchup/25 transition hover:bg-ketchup-600">Add a mailbox</a>
+			</div></div>`)
+			_, err := io.WriteString(w, b.String())
 			return err
 		}
 
-		for i, acct := range data.Accounts {
-			_, err := fmt.Fprintf(w, `		<div class="bg-white shadow overflow-hidden sm:rounded-lg mb-6">
-			<div class="px-4 py-5 sm:px-6 flex justify-between items-center">
-				<div>
-					<h3 class="text-lg leading-6 font-medium text-gray-900">%s</h3>
-					<p class="mt-1 text-sm text-gray-500">%s — %s</p>
+		b.WriteString(`<div class="mt-8 space-y-4">`)
+		for _, a := range data.Accounts {
+			dot, tone, label, live := "bg-zinc-500", "text-mute", "Never synced", ""
+			if a.IsSyncing {
+				dot, tone, label, live = "bg-emerald-400", "text-emerald-300", "Syncing now", " live-dot"
+			} else if a.LastSyncAt != "" {
+				dot, tone, label = "bg-emerald-500/80", "text-zinc-300", "Up to date"
+			}
+			if a.Errors != "" && !a.IsSyncing {
+				dot, tone, label = "bg-amber-400", "text-amber-300", "Completed with errors"
+			}
+
+			lastSyncCell := a.LastSyncAt
+			if lastSyncCell == "" {
+				lastSyncCell = "Never"
+			}
+
+			b.WriteString(`<div class="overflow-hidden rounded-2xl border border-white/10 bg-ink-900/60 shadow-xl shadow-black/30">`)
+			fmt.Fprintf(&b, `<div class="flex flex-wrap items-center justify-between gap-4 p-5">
+				<div class="min-w-0">
+					<div class="flex items-center gap-3">
+						<span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white/5 font-display text-sm font-semibold text-ketchup ring-1 ring-inset ring-white/10">%s</span>
+						<div class="min-w-0">
+							<h3 class="truncate font-display text-lg font-semibold text-white">%s</h3>
+							<p class="truncate font-mono text-xs text-mute">%s · %s</p>
+						</div>
+					</div>
 				</div>
-				<div class="flex items-center space-x-3">
-`, acct.Name, acct.Host, acct.Username)
-			if err != nil {
-				return err
-			}
-
-			if acct.IsSyncing {
-				_, err = fmt.Fprintf(w, `					<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium">
-						<span class="w-2 h-2 mr-1 rounded-full bg-green-500 animate-pulse"></span>
-						Running
-					</span>
-`)
-			} else if acct.LastSyncAt != "" {
-				_, err = fmt.Fprintf(w, `					<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium">
-						<span class="w-2 h-2 mr-1 rounded-full bg-gray-400"></span>
-						Completed
-					</span>
-`)
-			} else {
-				_, err = fmt.Fprintf(w, `					<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium">
-						<span class="w-2 h-2 mr-1 rounded-full bg-gray-400"></span>
-						Never synced
-					</span>
-`)
-			}
-			if err != nil {
-				return err
-			}
-
-			_, err = fmt.Fprintf(w, `					<form method="POST" action="/sync/%d/trigger">
-						<button type="submit" class="inline-flex items-center px-3 py-1.5 border border-transparent shadow-sm text-xs font-medium rounded text-white bg-indigo-600 hover:bg-indigo-700">Trigger Sync</button>
+				<div class="flex items-center gap-3">
+					%s
+					<form method="POST" action="/sync/%d/trigger">
+						<button type="submit" class="inline-flex items-center gap-2 rounded-xl bg-ketchup px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-ketchup/20 transition hover:bg-ketchup-600 disabled:cursor-not-allowed disabled:opacity-50" %s>
+							<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+							Sync now
+						</button>
 					</form>
 				</div>
-			</div>
-`, acct.ID)
-			if err != nil {
-				return err
+			</div>`,
+				initials(a.Name), html.EscapeString(a.Name), html.EscapeString(a.Host), html.EscapeString(a.Username),
+				statPill(dot, tone, label, live), a.ID, disabledAttr(a.IsSyncing))
+
+			fmt.Fprintf(&b, `<div class="grid grid-cols-1 divide-y divide-white/5 border-t border-white/10 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+				<div class="px-5 py-4"><p class="font-mono text-[11px] uppercase tracking-widest text-mute">Last sync</p><p class="mt-1 font-mono text-sm text-zinc-200">%s</p></div>
+				<div class="px-5 py-4"><p class="font-mono text-[11px] uppercase tracking-widest text-mute">Emails archived</p><p class="mt-1 font-mono text-sm text-zinc-200 tabular-nums">%s</p></div>
+				<div class="px-5 py-4"><p class="font-mono text-[11px] uppercase tracking-widest text-mute">Folders</p><p class="mt-1 truncate font-mono text-sm text-zinc-200">%s</p></div>
+			</div>`, html.EscapeString(lastSyncCell), commas(a.EmailsBackedUp), html.EscapeString(orDash(a.Folders)))
+
+			if a.Errors != "" {
+				fmt.Fprintf(&b, `<div class="border-t border-white/10 bg-amber-500/5 px-5 py-3"><p class="flex items-start gap-2 text-xs text-amber-300/90"><svg class="mt-0.5 h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg><span class="font-mono">%s</span></p></div>`, html.EscapeString(a.Errors))
 			}
 
-			// Sync info row
-			_, err = fmt.Fprintf(w, `			<div class="border-t border-gray-200 px-4 py-4 sm:px-6 grid grid-cols-3 gap-4 text-sm">
-				<div>
-					<p class="text-gray-500">Last Sync</p>
-					<p class="font-medium text-gray-900">%s</p>
-				</div>
-				<div>
-					<p class="text-gray-500">Emails Backed Up</p>
-					<p class="font-medium text-gray-900">%d</p>
-				</div>
-				<div>
-					<p class="text-gray-500">Folders</p>
-					<p class="font-medium text-gray-900">%s</p>
-				</div>
-`, acct.LastSyncAt, acct.EmailsBackedUp, acct.Folders)
-			if err != nil {
-				return err
-			}
-
-			if acct.Errors != "" {
-				_, err = fmt.Fprintf(w, `				<div>
-					<p class="text-gray-500">Last Error</p>
-					<p class="font-medium text-red-600">%s</p>
-				</div>
-`, acct.Errors)
-				if err != nil {
-					return err
-				}
-			}
-
-			_, err = fmt.Fprintf(w, `			</div>
-`)
-			if err != nil {
-				return err
-			}
-
-			// Recent runs
-			if len(acct.RecentRuns) > 0 {
-				_, err = fmt.Fprintf(w, `			<div class="border-t border-gray-200 px-4 py-4 sm:px-6">
-				<h4 class="text-sm font-medium text-gray-900 mb-3">Recent Sync Runs</h4>
-				<table class="min-w-full divide-y divide-gray-200">
-					<thead class="bg-gray-50">
-						<tr>
-							<th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
-							<th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Finished</th>
-							<th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-							<th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Emails</th>
-							<th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
-						</tr>
-					</thead>
-					<tbody class="bg-white divide-y divide-gray-200">
-`)
-				if err != nil {
-					return err
-				}
-
-				for _, run := range acct.RecentRuns {
-					_, err = fmt.Fprintf(w, `						<tr>
-							<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">%s</td>
-							<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500">%s</td>
-							<td class="px-3 py-2 whitespace-nowrap">
-								<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
-									<span class="w-1.5 h-1.5 mr-1 rounded-full %s"></span>
-									%s
-								</span>
-							</td>
-							<td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">%d</td>
-							<td class="px-3 py-2 text-sm text-gray-500 max-w-xs truncate">%s</td>
-						</tr>
-`, run.StartedAt, run.FinishedAt, run.Status, run.Status, run.EmailsBackedUp, run.Errors)
-					if err != nil {
-						return err
+			if len(a.RecentRuns) > 0 {
+				b.WriteString(`<details class="group border-t border-white/10">
+					<summary class="flex cursor-pointer list-none items-center justify-between px-5 py-3 text-xs font-medium text-mute transition hover:text-zinc-200">
+						<span class="font-mono uppercase tracking-widest">Recent runs (` + strconv.Itoa(len(a.RecentRuns)) + `)</span>
+						<svg class="h-4 w-4 transition-transform group-open:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+					</summary>
+					<div class="overflow-x-auto border-t border-white/5">
+					<table class="w-full min-w-[560px] text-sm">
+						<thead><tr class="text-left font-mono text-[10px] uppercase tracking-widest text-mute">
+							<th class="px-5 py-2.5 font-medium">Started</th>
+							<th class="px-5 py-2.5 font-medium">Finished</th>
+							<th class="px-5 py-2.5 font-medium">Status</th>
+							<th class="px-5 py-2.5 text-right font-medium">Emails</th>
+						</tr></thead>
+						<tbody class="divide-y divide-white/5">`)
+				for _, run := range a.RecentRuns {
+					rdot, rtone, rlabel := "bg-zinc-500", "text-mute", "Unknown"
+					switch run.Status {
+					case "running":
+						rdot, rtone, rlabel = "bg-emerald-400", "text-emerald-300", "Running"
+					case "completed":
+						rdot, rtone, rlabel = "bg-emerald-500/80", "text-zinc-300", "Completed"
+					case "failed":
+						rdot, rtone, rlabel = "bg-red-500", "text-red-300", "Failed"
+					case "partial":
+						rdot, rtone, rlabel = "bg-amber-400", "text-amber-300", "Partial"
 					}
+					fmt.Fprintf(&b, `<tr class="transition-colors hover:bg-white/[0.02]">
+						<td class="px-5 py-2.5 font-mono text-xs text-zinc-300">%s</td>
+						<td class="px-5 py-2.5 font-mono text-xs text-mute">%s</td>
+						<td class="px-5 py-2.5">%s</td>
+						<td class="px-5 py-2.5 text-right font-mono text-xs text-zinc-200 tabular-nums">%s</td>
+					</tr>`, html.EscapeString(orDash(run.StartedAt)), html.EscapeString(orDash(run.FinishedAt)),
+						statPill(rdot, rtone, rlabel, ""), commas(run.EmailsBackedUp))
 				}
-
-				_, err = fmt.Fprintf(w, `					</tbody>
-				</table>
-			</div>
-`)
-				if err != nil {
-					return err
-				}
+				b.WriteString(`</tbody></table></div></details>`)
 			}
 
-			_, err = fmt.Fprintf(w, `		</div>
-`)
-			if err != nil {
-				return err
-			}
+			b.WriteString(`</div>`)
+		}
+		b.WriteString(`</div></div>`)
 
-			// Add refresh interval for running accounts
-			if i == 0 && hasRunningSync(data.Accounts) {
-				_, err = fmt.Fprint(w, `	<script>
-		setInterval(function() { location.reload(); }, 10000);
-	</script>
-`)
-				if err != nil {
-					return err
-				}
-			}
+		if hasRunningSync(data.Accounts) {
+			b.WriteString(`<script>setTimeout(function(){location.reload()},8000)</script>`)
 		}
 
-		_, err = fmt.Fprint(w, `	</div>
-</main>`)
+		_, err := io.WriteString(w, b.String())
 		return err
 	})
+	return layout.Document("Dashboard", "dashboard", inner)
 }
 
 func hasRunningSync(accounts []AccountSyncView) bool {
@@ -248,4 +234,32 @@ func hasRunningSync(accounts []AccountSyncView) bool {
 	return false
 }
 
-var _ = templruntime.GeneratedTemplate
+func disabledAttr(syncing bool) string {
+	if syncing {
+		return "disabled"
+	}
+	return ""
+}
+
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
+}
+
+func initials(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "?"
+	}
+	fields := strings.Fields(name)
+	if len(fields) == 1 {
+		r := []rune(fields[0])
+		if len(r) == 1 {
+			return strings.ToUpper(string(r))
+		}
+		return strings.ToUpper(string(r[:2]))
+	}
+	return strings.ToUpper(string([]rune(fields[0])[:1]) + string([]rune(fields[1])[:1]))
+}

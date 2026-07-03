@@ -3,15 +3,16 @@
 // templ: version: v0.3.1020
 package browse
 
-//lint:file-ignore SA4006 This context is only used if a nested component is present.
-
-import "github.com/a-h/templ"
-import templruntime "github.com/a-h/templ/runtime"
-
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
+	"strings"
+
+	"katchup/internal/view/layout"
+
+	"github.com/a-h/templ"
 )
 
 type PageData struct {
@@ -39,209 +40,155 @@ type EmailView struct {
 	AccountID int64
 }
 
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 func BrowsePage(data PageData) templ.Component {
-	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, err := fmt.Fprintf(w, `<nav class="bg-white shadow">
-	<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-		<div class="flex justify-between h-16">
-			<div class="flex">
-				<div class="shrink-0 flex items-center">
-					<span class="text-xl font-bold text-gray-800">Katchup</span>
-				</div>
-				<div class="ml-6 flex space-x-4 self-center">
-					<a href="/accounts" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Accounts</a>
-					<a href="/sync" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Sync</a>
-					<a href="/browse" class="text-gray-900 inline-flex items-center px-1 pt-1 border-b-2 border-indigo-500 text-sm font-medium">Browse</a>
-				</div>
-			</div>
-		</div>
-	</div>
-</nav>
-<main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-	<div class="px-4 py-6 sm:px-0">
-		<h2 class="text-lg leading-6 font-medium text-gray-900 mb-4">Browse Backed Up Emails</h2>
-`)
-		if err != nil {
-			return err
-		}
+	inner := templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		var b strings.Builder
+		b.WriteString(`<div class="rise">`)
+		b.WriteString(layout.PageHeader("Archive", "Browse", "Search and download individual messages from your encrypted archive.", ""))
 
-		// Filters
-		_, err = fmt.Fprintf(w, `		<form method="GET" action="/browse" class="mb-6 bg-white shadow sm:rounded-lg">
-			<div class="px-4 py-3 sm:px-6 grid grid-cols-3 gap-4">
-				<div>
-					<label for="account" class="block text-sm font-medium text-gray-700">Account</label>
-					<select name="account" id="account" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-						<option value="">All accounts</option>
-`)
-		if err != nil {
-			return err
-		}
-
+		// Filter bar
+		inputCls := "rounded-xl border border-white/10 bg-ink-950/60 px-3.5 py-2.5 text-sm text-white outline-none transition focus:border-ketchup/60 focus:ring-2 focus:ring-ketchup/25"
+		b.WriteString(`<form method="GET" action="/browse" class="mb-6 flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-ink-900/60 p-4">
+			<div class="flex flex-col gap-1.5">
+				<label for="account" class="font-mono text-[11px] uppercase tracking-widest text-mute">Account</label>
+				<select name="account" id="account" class="` + inputCls + ` min-w-[200px]">
+					<option value="">All accounts</option>`)
 		for _, acct := range data.Accounts {
-			selected := ""
+			sel := ""
 			if acct.ID == data.AccountID {
-				selected = " selected"
+				sel = " selected"
 			}
-			_, err = fmt.Fprintf(w, `						<option value="%d"%s>%s (%d)</option>
-`, acct.ID, selected, acct.Name, acct.Emails)
-			if err != nil {
-				return err
-			}
+			fmt.Fprintf(&b, `<option value="%d"%s>%s (%s)</option>`, acct.ID, sel, html.EscapeString(acct.Name), commasInt(acct.Emails))
 		}
-
-		_, err = fmt.Fprintf(w, `					</select>
-				</div>
-				<div>
-					<label for="date" class="block text-sm font-medium text-gray-700">Date</label>
-					<input type="date" name="date" id="date" value="%s" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-				</div>
-				<div class="flex items-end">
-					<button type="submit" class="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">Filter</button>
-				</div>
+		fmt.Fprintf(&b, `</select>
 			</div>
-		</form>
-`, data.Date)
-		if err != nil {
-			return err
-		}
+			<div class="flex flex-col gap-1.5">
+				<label for="date" class="font-mono text-[11px] uppercase tracking-widest text-mute">Date</label>
+				<input type="date" name="date" id="date" value="%s" class="%s">
+			</div>
+			<button type="submit" class="inline-flex items-center gap-2 rounded-xl bg-ketchup px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ketchup/25 transition hover:bg-ketchup-600">
+				<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+				Filter
+			</button>
+		</form>`, html.EscapeString(data.Date), inputCls)
 
 		if len(data.Emails) == 0 {
-			_, err = fmt.Fprint(w, `		<div class="text-center py-12 bg-white shadow sm:rounded-lg">
-			<h3 class="mt-2 text-sm font-medium text-gray-900">No emails found</h3>
-			<p class="mt-1 text-sm text-gray-500">No backed up emails match your filters.</p>
-		</div>
-`)
+			b.WriteString(`<div class="rounded-2xl border border-dashed border-white/12 bg-ink-900/40 px-6 py-20 text-center">
+				<div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-white/5 text-2xl ring-1 ring-inset ring-white/10">🔍</div>
+				<h3 class="font-display text-lg font-semibold text-white">No emails found</h3>
+				<p class="mx-auto mt-1 max-w-sm text-sm text-mute">Nothing in the archive matches these filters. Try a different account or date.</p>
+			</div></div>`)
+			_, err := io.WriteString(w, b.String())
 			return err
 		}
 
-		// Email list
-		_, err = fmt.Fprintf(w, `		<div class="bg-white shadow sm:rounded-lg">
-			<table class="min-w-full divide-y divide-gray-200">
-				<thead class="bg-gray-50">
-					<tr>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folder</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UID</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-					</tr>
-				</thead>
-				<tbody class="bg-white divide-y divide-gray-200">
-`)
-		if err != nil {
-			return err
+		b.WriteString(`<div class="overflow-hidden rounded-2xl border border-white/10 bg-ink-900/60 shadow-2xl shadow-black/40">
+			<div class="overflow-x-auto">
+			<table class="w-full min-w-[640px] text-sm">
+				<thead><tr class="border-b border-white/10 text-left font-mono text-[11px] uppercase tracking-widest text-mute">
+					<th class="px-5 py-3.5 font-medium">Date</th>
+					<th class="px-5 py-3.5 font-medium">Folder</th>
+					<th class="px-5 py-3.5 font-medium">Message</th>
+					<th class="px-5 py-3.5 font-medium">Size</th>
+					<th class="px-5 py-3.5 text-right font-medium">Actions</th>
+				</tr></thead>
+				<tbody class="divide-y divide-white/5">`)
+		for _, e := range data.Emails {
+			fmt.Fprintf(&b, `<tr class="group transition-colors hover:bg-white/[0.025]">
+				<td class="px-5 py-3.5 font-mono text-xs text-zinc-300">%s</td>
+				<td class="px-5 py-3.5"><span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">%s</span></td>
+				<td class="px-5 py-3.5 font-mono text-xs text-mute">%s</td>
+				<td class="px-5 py-3.5 font-mono text-xs text-zinc-400 tabular-nums">%s</td>
+				<td class="px-5 py-3.5 text-right">
+					<a href="/browse/%d/%s/%s" class="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-ketchup/50 hover:bg-ketchup/10 hover:text-white">
+						<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+						Download
+					</a>
+				</td>
+			</tr>`, html.EscapeString(e.Date), html.EscapeString(orDash(e.Folder)), html.EscapeString(e.Filename), humanBytes(e.Size),
+				e.AccountID, html.EscapeString(e.Date), html.EscapeString(e.Filename))
 		}
-
-		for _, email := range data.Emails {
-			_, err = fmt.Fprintf(w, `					<tr>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">%s</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%s</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%s</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%d</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-							<a href="/browse/%d/%s/%s" class="text-indigo-600 hover:text-indigo-900">Download</a>
-						</td>
-					</tr>
-`, email.Date, email.Folder, email.Filename, email.Size, email.AccountID, email.Folder, email.Filename)
-			if err != nil {
-				return err
-			}
-		}
-
-		_, err = fmt.Fprintf(w, `				</tbody>
-			</table>
-`)
-		if err != nil {
-			return err
-		}
+		b.WriteString(`</tbody></table></div>`)
 
 		// Pagination
 		if data.Total > data.PerPage {
 			totalPages := (data.Total + data.PerPage - 1) / data.PerPage
-			_, err = fmt.Fprintf(w, `			<div class="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
-				<div class="flex-1 flex justify-between sm:hidden">
-					<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">Previous</a>
-					<a href="/browse?account=%d&date=%s&page=%d" class="ml-3 relative inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">Next</a>
-				</div>
-				<div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-					<div>
-						<p class="text-sm text-gray-700">
-							Showing page <strong>%d</strong> of <strong>%d</strong>
-						</p>
-					</div>
-					<div>
-						<nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-`, data.AccountID, data.Date, data.Page-1, data.AccountID, data.Date, data.Page+1, data.Page, totalPages)
-			if err != nil {
-				return err
+			b.WriteString(`<div class="flex items-center justify-between gap-4 border-t border-white/10 px-5 py-3.5">`)
+			fmt.Fprintf(&b, `<p class="font-mono text-xs text-mute">Page <span class="text-zinc-200">%d</span> of <span class="text-zinc-200">%d</span> · <span class="text-zinc-200">%s</span> emails</p>`, data.Page, totalPages, commasInt(int64(data.Total)))
+			b.WriteString(`<div class="flex items-center gap-1.5">`)
+
+			pageBtn := func(page int, labelHTML string, enabled, active bool) {
+				if active {
+					fmt.Fprintf(&b, `<span class="rounded-lg bg-ketchup px-3 py-1.5 text-xs font-semibold text-white">%s</span>`, labelHTML)
+					return
+				}
+				if !enabled {
+					fmt.Fprintf(&b, `<span class="rounded-lg border border-white/5 px-3 py-1.5 text-xs font-medium text-zinc-600">%s</span>`, labelHTML)
+					return
+				}
+				fmt.Fprintf(&b, `<a href="/browse?account=%d&date=%s&page=%d" class="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-white/25 hover:bg-white/5 hover:text-white">%s</a>`,
+					data.AccountID, html.EscapeString(data.Date), page, labelHTML)
 			}
 
-			prevPage := data.Page - 1
-			if prevPage < 1 {
-				prevPage = 1
-			}
-			nextPage := data.Page + 1
+			pageBtn(data.Page-1, "Prev", data.Page > 1, false)
 
-			if data.Page > 1 {
-				_, err = fmt.Fprintf(w, `							<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50">Previous</a>
-`, data.AccountID, data.Date, prevPage)
-				if err != nil {
-					return err
+			start := data.Page - 2
+			if start < 1 {
+				start = 1
+			}
+			end := start + 4
+			if end > totalPages {
+				end = totalPages
+			}
+			if end-start < 4 {
+				start = end - 4
+				if start < 1 {
+					start = 1
 				}
 			}
-
-			startPage := data.Page - 2
-			if startPage < 1 {
-				startPage = 1
-			}
-			endPage := startPage + 4
-			if endPage > totalPages {
-				endPage = totalPages
-			}
-			if endPage-startPage < 4 {
-				startPage = endPage - 4
-				if startPage < 1 {
-					startPage = 1
-				}
+			for p := start; p <= end; p++ {
+				pageBtn(p, fmt.Sprintf("%d", p), true, p == data.Page)
 			}
 
-			for p := startPage; p <= endPage; p++ {
-				active := ""
-				if p == data.Page {
-					active = "bg-indigo-50 border-indigo-500 text-indigo-600"
-				} else {
-					active = "bg-white border-gray-300 text-gray-500 hover:bg-gray-50"
-				}
-				_, err = fmt.Fprintf(w, `							<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-4 py-2 border %s text-sm font-medium">%d</a>
-`, data.AccountID, data.Date, p, active, p)
-				if err != nil {
-					return err
-				}
-			}
-
-			if data.Page < totalPages {
-				_, err = fmt.Fprintf(w, `							<a href="/browse?account=%d&date=%s&page=%d" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50">Next</a>
-`, data.AccountID, data.Date, nextPage)
-				if err != nil {
-					return err
-				}
-			}
-
-			_, err = fmt.Fprintf(w, `						</nav>
-					</div>
-				</div>
-			</div>
-`)
-			if err != nil {
-				return err
-			}
+			pageBtn(data.Page+1, "Next", data.Page < totalPages, false)
+			b.WriteString(`</div></div>`)
 		}
 
-		_, err = fmt.Fprintf(w, `		</div>
-	</div>
-</main>`)
+		b.WriteString(`</div></div>`)
+		_, err := io.WriteString(w, b.String())
 		return err
 	})
+	return layout.Document("Browse", "browse", inner)
 }
 
-var _ = templruntime.GeneratedTemplate
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
+}
+
+func commasInt(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}

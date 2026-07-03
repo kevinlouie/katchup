@@ -154,7 +154,7 @@ func (h *SyncHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	http.Redirect(w, r, "/sync", http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // parseAccountIDFromSyncPath extracts the account ID from /sync/{id}/trigger

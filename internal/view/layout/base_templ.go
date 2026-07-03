@@ -5,59 +5,149 @@ package layout
 
 //lint:file-ignore SA4006 This context is only used if a nested component is present.
 
-import "github.com/a-h/templ"
-import templruntime "github.com/a-h/templ/runtime"
-
 import (
 	"context"
+	"fmt"
 	"io"
+
+	"github.com/a-h/templ"
 )
 
-type PageData struct {
-	Title   string
-	Nav     []NavItem
-	Active  string
-	Content templ.Component
-}
-
-type NavItem struct {
-	Label  string
-	Href   string
-	Active bool
-}
-
-func Base(data PageData) templ.Component {
+// Document wraps inner page content in the full HTML shell: fonts, Tailwind
+// configuration, the top navigation bar, and the atmospheric background.
+// active selects the highlighted nav item: "dashboard", "accounts", or "browse".
+func Document(title, active string, inner templ.Component) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = w.Write([]byte("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>"))
-		_, _ = w.Write([]byte(data.Title))
-		_, _ = w.Write([]byte("</title>\n    <script src=\"https://cdn.tailwindcss.com\"></script>\n</head>\n<body class=\"bg-gray-100\">\n    <div class=\"flex h-screen\">\n        <aside class=\"w-56 bg-white shadow\">\n            <div class=\"p-4\">\n                <h1 class=\"text-xl font-bold\">Katchup</h1>\n            </div>\n            <nav class=\"mt-4\">\n"))
-
-		for _, item := range data.Nav {
-			active := ""
-			if item.Active {
-				active = " bg-gray-100 text-gray-900"
-			} else {
-				active = " text-gray-600 hover:bg-gray-50"
-			}
-			_, _ = w.Write([]byte("                <a href=\""))
-			_, _ = w.Write([]byte(item.Href))
-			_, _ = w.Write([]byte("\" class=\""))
-			_, _ = w.Write([]byte(active))
-			_, _ = w.Write([]byte(" block px-4 py-2\">\n                    "))
-			_, _ = w.Write([]byte(item.Label))
-			_, _ = w.Write([]byte("\n                </a>\n"))
-		}
-
-		_, _ = w.Write([]byte("            </nav>\n        </aside>\n        <main class=\"flex-1 overflow-auto\">\n"))
-
-		err := data.Content.Render(ctx, w)
-		if err != nil {
+		if _, err := io.WriteString(w, head(title)); err != nil {
 			return err
 		}
-
-		_, _ = w.Write([]byte("        </main>\n    </div>\n</body>\n</html>"))
-		return nil
+		if _, err := io.WriteString(w, nav(active)); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, `<main class="relative z-10 mx-auto w-full max-w-6xl flex-1 px-5 py-10 sm:px-8">`); err != nil {
+			return err
+		}
+		if inner != nil {
+			if err := inner.Render(ctx, w); err != nil {
+				return err
+			}
+		}
+		_, err := io.WriteString(w, `</main>`+footer())
+		return err
 	})
 }
 
-var _ = templruntime.GeneratedTemplate
+// PageHeader renders a consistent page title block with an optional right-side
+// action (pass empty actionHTML for none).
+func PageHeader(eyebrow, title, subtitle, actionHTML string) string {
+	return fmt.Sprintf(`<div class="mb-8 flex flex-wrap items-end justify-between gap-4">
+	<div>
+		<p class="mb-1 font-mono text-[11px] uppercase tracking-[0.25em] text-ketchup/80">%s</p>
+		<h1 class="font-display text-3xl font-semibold tracking-tight text-white sm:text-4xl">%s</h1>
+		<p class="mt-1.5 max-w-xl text-sm text-mute">%s</p>
+	</div>
+	%s
+</div>`, eyebrow, title, subtitle, actionHTML)
+}
+
+func head(title string) string {
+	return `<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>` + title + ` · katchup</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🥫</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        ink: { 950:'#08080a', 900:'#101013', 850:'#16161a', 800:'#1d1d22', 700:'#26262d', 600:'#33333c' },
+        ketchup: { DEFAULT:'#e6392e', 600:'#d62d24', 700:'#b21f18' },
+        mute: '#8a8a95',
+      },
+      fontFamily: {
+        display: ['"Bricolage Grotesque"','ui-sans-serif','sans-serif'],
+        sans: ['"Instrument Sans"','ui-sans-serif','system-ui','sans-serif'],
+        mono: ['"JetBrains Mono"','ui-monospace','monospace'],
+      },
+    },
+  },
+}
+</script>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    background-color: #08080a;
+    background-image:
+      radial-gradient(900px 500px at 82% -8%, rgba(230,57,46,0.16), transparent 60%),
+      radial-gradient(700px 500px at 0% 0%, rgba(230,57,46,0.05), transparent 55%);
+    background-attachment: fixed;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  ::selection { background: rgba(230,57,46,0.35); color: #fff; }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track { background: #101013; }
+  ::-webkit-scrollbar-thumb { background: #2c2c34; border-radius: 6px; border: 2px solid #101013; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a44; }
+  input, select { color-scheme: dark; }
+  .nav-link { position: relative; }
+  .nav-link[data-active="true"]::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -21px; height: 2px;
+    background: #e6392e; border-radius: 2px; box-shadow: 0 0 12px rgba(230,57,46,0.7);
+  }
+  @keyframes livepulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.82); } }
+  .live-dot { animation: livepulse 1.4s ease-in-out infinite; }
+  @keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .rise { opacity: 0; animation: riseIn 0.5s cubic-bezier(0.22,1,0.36,1) forwards; }
+</style>
+</head>
+<body class="flex min-h-screen flex-col font-sans text-zinc-200 antialiased">`
+}
+
+func nav(active string) string {
+	link := func(href, label, key string) string {
+		on := "false"
+		cls := "text-mute hover:text-white"
+		if key == active {
+			on = "true"
+			cls = "text-white"
+		}
+		return fmt.Sprintf(`<a href="%s" data-active="%s" class="nav-link text-sm font-medium transition-colors %s">%s</a>`, href, on, cls, label)
+	}
+	return `<header class="sticky top-0 z-30 border-b border-white/5 bg-ink-950/70 backdrop-blur-xl">
+	<div class="mx-auto flex h-16 w-full max-w-6xl items-center gap-8 px-5 sm:px-8">
+		<a href="/" class="group flex items-center gap-2.5">
+			<span class="grid h-9 w-9 place-items-center rounded-xl bg-ketchup/15 text-lg ring-1 ring-inset ring-ketchup/30 transition-transform group-hover:-rotate-6">🥫</span>
+			<span class="font-display text-xl font-bold lowercase tracking-tight text-white">katchup</span>
+		</a>
+		<nav class="flex items-center gap-7">
+			` + link("/", "Dashboard", "dashboard") + `
+			` + link("/accounts", "Accounts", "accounts") + `
+			` + link("/browse", "Browse", "browse") + `
+		</nav>
+		<div class="ml-auto hidden items-center gap-2 font-mono text-[11px] uppercase tracking-widest text-mute sm:flex">
+			<span class="live-dot h-1.5 w-1.5 rounded-full bg-emerald-400"></span> archiving
+		</div>
+	</div>
+</header>`
+}
+
+func footer() string {
+	return `<footer class="relative z-10 border-t border-white/5 py-6">
+	<div class="mx-auto flex w-full max-w-6xl items-center justify-between px-5 font-mono text-[11px] text-mute/70 sm:px-8">
+		<span>🥫 katchup — self-hosted imap archive</span>
+		<span>encrypted at rest</span>
+	</div>
+</footer>
+</body>
+</html>`
+}

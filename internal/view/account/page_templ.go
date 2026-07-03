@@ -5,13 +5,16 @@ package account
 
 //lint:file-ignore SA4006 This context is only used if a nested component is present.
 
-import "github.com/a-h/templ"
-import templruntime "github.com/a-h/templ/runtime"
-
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
+	"strings"
+
+	"katchup/internal/view/layout"
+
+	"github.com/a-h/templ"
 )
 
 type PageData struct {
@@ -35,260 +38,176 @@ type AccountView struct {
 }
 
 func ListPage(data PageData) templ.Component {
-	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, err := fmt.Fprintf(w, `<nav class="bg-white shadow">
-	<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-		<div class="flex justify-between h-16">
-			<div class="flex">
-				<div class="shrink-0 flex items-center">
-					<span class="text-xl font-bold text-gray-800">Katchup</span>
-				</div>
-				<div class="ml-6 flex space-x-4 self-center">
-					<a href="/accounts" class="text-gray-900 inline-flex items-center px-1 pt-1 border-b-2 border-indigo-500 text-sm font-medium">Accounts</a>
-					<a href="/sync" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Sync</a>
-					<a href="/browse" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Browse</a>
-				</div>
-			</div>
-			<div class="flex items-center">
-				<a href="/accounts/new" class="bg-indigo-600 text-white px-3 py-2 rounded-md text-sm font-medium hover:bg-indigo-700">Add Account</a>
-			</div>
-		</div>
-	</div>
-</nav>
-<main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-	<div class="px-4 py-6 sm:px-0">
-`)
+	inner := templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		var b strings.Builder
+
+		action := `<a href="/accounts/new" class="inline-flex items-center gap-2 rounded-xl bg-ketchup px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ketchup/25 transition hover:bg-ketchup-600 hover:shadow-ketchup/40">
+			<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+			Add account</a>`
+		b.WriteString(`<div class="rise">`)
+		b.WriteString(layout.PageHeader("Mailboxes", "Accounts", "IMAP mailboxes katchup connects to and archives on a schedule.", action))
 
 		if len(data.Accounts) == 0 {
-			_, err := fmt.Fprintf(w, `		<div class="text-center py-12">
-			<h3 class="mt-2 text-sm font-medium text-gray-900">No accounts yet</h3>
-			<p class="mt-1 text-sm text-gray-500">Get started by creating a new email account.</p>
-			<div class="mt-6">
-				<a href="/accounts/new" class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">Add Account</a>
-			</div>
-		</div>`)
+			b.WriteString(`<div class="rounded-2xl border border-dashed border-white/12 bg-ink-900/40 px-6 py-20 text-center">
+				<div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-ketchup/10 text-2xl ring-1 ring-inset ring-ketchup/25">📬</div>
+				<h3 class="font-display text-lg font-semibold text-white">No mailboxes yet</h3>
+				<p class="mx-auto mt-1 max-w-sm text-sm text-mute">Connect an IMAP account and katchup will begin backing up every message, encrypted at rest.</p>
+				<a href="/accounts/new" class="mt-6 inline-flex items-center gap-2 rounded-xl bg-ketchup px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ketchup/25 transition hover:bg-ketchup-600">Add your first account</a>
+			</div></div>`)
+			_, err := io.WriteString(w, b.String())
 			return err
 		}
 
-		_, err = fmt.Fprintf(w, `		<div class="flex justify-between items-center mb-4">
-			<h2 class="text-lg leading-6 font-medium text-gray-900">Email Accounts (%d)</h2>
-		</div>
-		<div class="bg-white shadow overflow-hidden sm:rounded-lg">
-			<table class="min-w-full divide-y divide-gray-200">
-				<thead class="bg-gray-50">
-					<tr>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Host</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Username</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folders</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-						<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+		b.WriteString(`<div class="overflow-hidden rounded-2xl border border-white/10 bg-ink-900/60 shadow-2xl shadow-black/40">
+			<div class="overflow-x-auto">
+			<table class="w-full min-w-[720px] text-sm">
+				<thead>
+					<tr class="border-b border-white/10 text-left font-mono text-[11px] uppercase tracking-widest text-mute">
+						<th class="px-5 py-3.5 font-medium">Name</th>
+						<th class="px-5 py-3.5 font-medium">Host</th>
+						<th class="px-5 py-3.5 font-medium">Username</th>
+						<th class="px-5 py-3.5 font-medium">Folders</th>
+						<th class="px-5 py-3.5 font-medium">Status</th>
+						<th class="px-5 py-3.5 text-right font-medium">Actions</th>
 					</tr>
 				</thead>
-				<tbody class="bg-white divide-y divide-gray-200">
-`, len(data.Accounts))
-		if err != nil {
-			return err
-		}
+				<tbody class="divide-y divide-white/5">`)
 
 		for _, acct := range data.Accounts {
-			_, err = fmt.Fprintf(w, `					<tr>
-						<td class="px-6 py-4 whitespace-nowrap">
-							<div class="text-sm font-medium text-gray-900">%s</div>
-						</td>
-						<td class="px-6 py-4 whitespace-nowrap">
-							<div class="text-sm text-gray-500">%s:%d</div>
-						</td>
-						<td class="px-6 py-4 whitespace-nowrap">
-							<div class="text-sm text-gray-500">%s</div>
-						</td>
-						<td class="px-6 py-4 whitespace-nowrap">
-							<div class="text-sm text-gray-500">%s</div>
-						</td>
-						<td class="px-6 py-4 whitespace-nowrap">
-							<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium">
-								<span class="w-2 h-2 mr-1 rounded-full %s"></span>
-								%s
-							</span>
-						</td>
-						<td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-							<a href="/accounts/%d/edit" class="text-indigo-600 hover:text-indigo-900 mr-3">Edit</a>
-							<form method="POST" action="/accounts/%d/delete" onsubmit="return confirm('Are you sure? This will delete the account and all synced emails.')" class="inline">
-								<button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
-							</form>
-						</td>
-					</tr>
-`, acct.Name, acct.Host, acct.Port, acct.Username, acct.Folders, "bg-gray-400", "Never", acct.ID, acct.ID)
-			if err != nil {
-				return err
+			dot, label, tone := "bg-zinc-500", "Never synced", "text-mute"
+			live := ""
+			if acct.IsSyncing {
+				dot, label, tone, live = "bg-emerald-400", "Syncing", "text-emerald-300", " live-dot"
+			} else if acct.UpdatedAt != "" {
+				dot, label, tone = "bg-emerald-500/80", "Synced", "text-zinc-300"
 			}
+
+			folders := ""
+			for _, f := range strings.Split(acct.Folders, ",") {
+				f = strings.TrimSpace(f)
+				if f == "" {
+					continue
+				}
+				folders += `<span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">` + html.EscapeString(f) + `</span> `
+			}
+
+			fmt.Fprintf(&b, `<tr class="group transition-colors hover:bg-white/[0.025]">
+				<td class="px-5 py-4"><div class="font-medium text-white">%s</div></td>
+				<td class="px-5 py-4"><span class="font-mono text-[13px] text-zinc-400">%s:%d</span></td>
+				<td class="px-5 py-4 text-zinc-400">%s</td>
+				<td class="px-5 py-4">%s</td>
+				<td class="px-5 py-4">
+					<span class="inline-flex items-center gap-2 rounded-full bg-white/5 px-2.5 py-1 text-xs font-medium %s">
+						<span class="h-1.5 w-1.5 rounded-full %s%s"></span>%s
+					</span>
+				</td>
+				<td class="px-5 py-4">
+					<div class="flex items-center justify-end gap-1.5">
+						<a href="/accounts/%d/edit" class="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-white/20 hover:bg-white/5 hover:text-white">Edit</a>
+						<form method="POST" action="/accounts/%d/delete" onsubmit="return confirm('Delete this account and every synced email? This cannot be undone.')">
+							<button type="submit" class="rounded-lg border border-transparent px-3 py-1.5 text-xs font-medium text-red-400/80 transition hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-300">Delete</button>
+						</form>
+					</div>
+				</td>
+			</tr>`, html.EscapeString(acct.Name), html.EscapeString(acct.Host), acct.Port, html.EscapeString(acct.Username), folders, tone, dot, live, label, acct.ID, acct.ID)
 		}
 
-		_, err = fmt.Fprintf(w, `				</tbody>
-			</table>
-		</div>
-	</div>
-</main>`)
+		b.WriteString(`</tbody></table></div></div></div>`)
+		_, err := io.WriteString(w, b.String())
 		return err
 	})
+	return layout.Document("Accounts", "accounts", inner)
 }
 
 func FormPage(data PageData) templ.Component {
-	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+	inner := templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		isEdit := data.Account != nil
-		pageTitle := "Add Account"
-		action := "/accounts/new"
-		buttonLabel := "Save"
-
+		title, eyebrow, action, buttonLabel := "Add account", "New mailbox", "/accounts/new", "Save account"
 		if isEdit {
-			pageTitle = "Edit Account"
+			title, eyebrow = "Edit account", "Mailbox"
 			action = fmt.Sprintf("/accounts/%d/edit", data.Account.ID)
-			buttonLabel = "Update"
+			buttonLabel = "Save changes"
 		}
 
-		_, err := fmt.Fprintf(w, `<nav class="bg-white shadow">
-	<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-		<div class="flex justify-between h-16">
-			<div class="flex">
-				<div class="shrink-0 flex items-center">
-					<span class="text-xl font-bold text-gray-800">Katchup</span>
-				</div>
-				<div class="ml-6 flex space-x-4 self-center">
-					<a href="/accounts" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Accounts</a>
-					<a href="/sync" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Sync</a>
-					<a href="/browse" class="text-gray-500 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 border-transparent text-sm font-medium">Browse</a>
-				</div>
-			</div>
-		</div>
-	</div>
-</nav>
-<main class="max-w-3xl mx-auto py-6 sm:px-6 lg:px-8">
-	<div class="px-4 py-6 sm:px-0">
-		<h2 class="text-lg leading-6 font-medium text-gray-900 mb-6">%s</h2>
-`, pageTitle)
-		if err != nil {
-			return err
-		}
-
-		// Render errors
-		if len(data.Errors) > 0 {
-			_, err = fmt.Fprint(w, `		<div class="bg-red-50 border border-red-200 rounded-md p-4 mb-6">
-			<ul class="list-disc list-inside text-sm text-red-700">
-`)
-			if err != nil {
-				return err
-			}
-			for _, e := range data.Errors {
-				_, err = fmt.Fprintf(w, `				<li>%s</li>
-`, e)
-				if err != nil {
-					return err
-				}
-			}
-			_, err = fmt.Fprint(w, `			</ul>
-		</div>
-`)
-			if err != nil {
-				return err
-			}
-		}
-
-		// Fill form values
-		name := ""
-		host := ""
-		port := "993"
-		username := ""
-		useSsl := "1"
-		folders := "INBOX"
-
+		name, host, port, username, folders := "", "", "993", "", "INBOX"
+		ssl := true
 		if data.Account != nil {
-			name = data.Account.Name
-			host = data.Account.Host
-			port = fmt.Sprintf("%d", data.Account.Port)
-			username = data.Account.Username
-			if data.Account.UseSsl {
-				useSsl = "1"
-			} else {
-				useSsl = "0"
-			}
-			folders = data.Account.Folders
+			a := data.Account
+			name, host, username, folders = a.Name, a.Host, a.Username, a.Folders
+			port = fmt.Sprintf("%d", a.Port)
+			ssl = a.UseSsl
 		}
-
-		sslChecked1 := ""
-		sslChecked0 := ""
-		if useSsl == "1" {
-			sslChecked1 = " checked"
+		sslChecked, starttlsChecked := "", ""
+		if ssl {
+			sslChecked = " checked"
 		} else {
-			sslChecked0 = " checked"
+			starttlsChecked = " checked"
+		}
+		passPlaceholder := "App password or account password"
+		passRequired := " required"
+		if isEdit {
+			passPlaceholder = "Leave blank to keep the current password"
+			passRequired = ""
 		}
 
-		_, err = fmt.Fprintf(w, `		<form method="POST" action="%s" class="space-y-6 bg-white shadow sm:rounded-lg">
-			<div class="px-4 py-5 sm:p-6 space-y-4">
-				<div>
-					<label for="name" class="block text-sm font-medium text-gray-700">Name</label>
-					<input type="text" name="name" id="name" value="%s" required class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-				</div>
-				<div class="grid grid-cols-2 gap-4">
-					<div>
-						<label for="host" class="block text-sm font-medium text-gray-700">Host</label>
-						<input type="text" name="host" id="host" value="%s" required placeholder="imap.gmail.com" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-					</div>
-					<div>
-						<label for="port" class="block text-sm font-medium text-gray-700">Port</label>
-						<input type="number" name="port" id="port" value="%s" required class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-					</div>
-				</div>
-				<div>
-					<label for="username" class="block text-sm font-medium text-gray-700">Username</label>
-					<input type="text" name="username" id="username" value="%s" required placeholder="you@example.com" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-				</div>
-				<div>
-					<label for="password" class="block text-sm font-medium text-gray-700">Password</label>
-					<input type="password" name="password" id="password" required placeholder="Account password or app-specific password" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-					<p class="mt-1 text-xs text-gray-500">Encrypted at rest with your master key.</p>
-				</div>
-				<div>
-					<label class="block text-sm font-medium text-gray-700 mb-1">Connection</label>
-					<div class="flex space-x-6">
-						<label class="inline-flex items-center">
-							<input type="radio" name="connection" value="993" id="conn-993"%s class="form-radio text-indigo-600">
-							<span class="ml-2 text-sm text-gray-700">IMAPS (port 993)</span>
-						</label>
-						<label class="inline-flex items-center">
-							<input type="radio" name="connection" value="143" id="conn-143"%s class="form-radio text-indigo-600">
-							<span class="ml-2 text-sm text-gray-700">STARTTLS (port 143)</span>
-						</label>
-					</div>
-				</div>
-				<div>
-					<label for="folders" class="block text-sm font-medium text-gray-700">Folders</label>
-					<input type="text" name="folders" id="folders" value="%s" placeholder="INBOX, Sent, Archive" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-					<p class="mt-1 text-xs text-gray-500">Comma-separated folder names (default: INBOX)</p>
-				</div>
-				<div>
-					<label for="slot" class="block text-sm font-medium text-gray-700">YubiKey Slot</label>
-					<select name="slot" id="slot" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
-						<option value="9a" selected>9a (primary)</option>
-						<option value="9b">9b</option>
-						<option value="9c">9c</option>
-						<option value="9d">9d</option>
-					</select>
-				</div>
-			</div>
-			<div class="px-4 py-3 bg-gray-50 text-right sm:px-6 sm:rounded-b-lg flex justify-end space-x-3">
-				<a href="/accounts" class="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">Cancel</a>
-				<button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">%s</button>
-			</div>
-		</form>
-`, action, name, host, port, username, sslChecked1, sslChecked0, folders, buttonLabel)
-		if err != nil {
-			return err
+		var b strings.Builder
+		b.WriteString(`<div class="rise mx-auto max-w-2xl">`)
+		b.WriteString(layout.PageHeader(eyebrow, title, "Credentials are encrypted at rest with your master key.", ""))
+
+		if len(data.Errors) > 0 {
+			b.WriteString(`<div class="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 p-4">
+				<p class="mb-2 flex items-center gap-2 text-sm font-semibold text-red-300"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>Please fix the following</p>
+				<ul class="list-inside list-disc space-y-1 pl-1 text-sm text-red-200/90">`)
+			for _, e := range data.Errors {
+				b.WriteString(`<li>` + html.EscapeString(e) + `</li>`)
+			}
+			b.WriteString(`</ul></div>`)
 		}
 
-		_, err = fmt.Fprintf(w, `	</div>
-</main>`)
+		label := func(f, t string) string {
+			return fmt.Sprintf(`<label for="%s" class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-mute">%s</label>`, f, t)
+		}
+		inputCls := "w-full rounded-xl border border-white/10 bg-ink-950/60 px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 outline-none transition focus:border-ketchup/60 focus:ring-2 focus:ring-ketchup/25"
+
+		fmt.Fprintf(&b, `<form method="POST" action="%s" class="space-y-5 rounded-2xl border border-white/10 bg-ink-900/60 p-6 shadow-2xl shadow-black/40 sm:p-7">
+			<div>%s<input type="text" name="name" id="name" value="%s" required placeholder="Personal Gmail" class="%s"></div>
+			<div class="grid grid-cols-1 gap-5 sm:grid-cols-[2fr,1fr]">
+				<div>%s<input type="text" name="host" id="host" value="%s" required placeholder="imap.gmail.com" class="%s font-mono"></div>
+				<div>%s<input type="number" name="port" id="port" value="%s" required class="%s font-mono"></div>
+			</div>
+			<div>%s<input type="text" name="username" id="username" value="%s" required placeholder="you@example.com" class="%s font-mono"></div>
+			<div>%s<input type="password" name="password" id="password"%s placeholder="%s" class="%s font-mono"><p class="mt-1.5 flex items-center gap-1.5 text-xs text-mute"><svg class="h-3.5 w-3.5 text-ketchup/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15v2m-6 4h12a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2Zm10-10V7a4 4 0 0 0-8 0v4"/></svg>Encrypted at rest with your master key.</p></div>
+			<div>
+				<span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-mute">Connection</span>
+				<div class="grid grid-cols-2 gap-3">
+					<label class="flex cursor-pointer items-center gap-2.5 rounded-xl border border-white/10 bg-ink-950/40 px-3.5 py-3 text-sm transition has-[:checked]:border-ketchup/60 has-[:checked]:bg-ketchup/10">
+						<input type="radio" name="connection" value="993"%s class="accent-ketchup"><span class="text-zinc-200">IMAPS<span class="ml-1 font-mono text-xs text-mute">:993</span></span>
+					</label>
+					<label class="flex cursor-pointer items-center gap-2.5 rounded-xl border border-white/10 bg-ink-950/40 px-3.5 py-3 text-sm transition has-[:checked]:border-ketchup/60 has-[:checked]:bg-ketchup/10">
+						<input type="radio" name="connection" value="143"%s class="accent-ketchup"><span class="text-zinc-200">STARTTLS<span class="ml-1 font-mono text-xs text-mute">:143</span></span>
+					</label>
+				</div>
+			</div>
+			<div>%s<input type="text" name="folders" id="folders" value="%s" placeholder="INBOX, Sent, Archive" class="%s"><p class="mt-1.5 text-xs text-mute">Comma-separated folder names. Defaults to INBOX.</p></div>
+			<div>%s<select name="slot" id="slot" class="%s"><option value="9a">9a (primary)</option><option value="9b">9b</option><option value="9c">9c</option><option value="9d">9d</option></select></div>
+			<div class="flex items-center justify-end gap-3 border-t border-white/10 pt-5">
+				<a href="/accounts" class="rounded-xl border border-white/10 px-4 py-2.5 text-sm font-medium text-zinc-300 transition hover:bg-white/5">Cancel</a>
+				<button type="submit" class="inline-flex items-center gap-2 rounded-xl bg-ketchup px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ketchup/25 transition hover:bg-ketchup-600 hover:shadow-ketchup/40">%s</button>
+			</div>
+		</form></div>`,
+			action,
+			label("name", "Display name"), html.EscapeString(name), inputCls,
+			label("host", "IMAP host"), html.EscapeString(host), inputCls,
+			label("port", "Port"), html.EscapeString(port), inputCls,
+			label("username", "Username"), html.EscapeString(username), inputCls,
+			label("password", "Password"), passRequired, passPlaceholder, inputCls,
+			sslChecked, starttlsChecked,
+			label("folders", "Folders"), html.EscapeString(folders), inputCls,
+			label("slot", "YubiKey slot"), inputCls,
+			buttonLabel)
+
+		_, err := io.WriteString(w, b.String())
 		return err
 	})
+	return layout.Document(data.Title, "accounts", inner)
 }
-
-var _ = templruntime.GeneratedTemplate
