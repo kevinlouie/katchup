@@ -81,6 +81,8 @@ func main() {
 		os.Exit(1)
 	}
 	syncer := imap.NewSyncer(imapStore, dataDir, keyWrapper, store)
+	syncer.ThrottleCooldown = cfg.ThrottleCooldown
+	syncer.FetchPacing = cfg.FetchPacing
 
 	// Header-only search backend (S10). When MEILI_URL is set, messages are
 	// indexed on store and /search queries Meilisearch; otherwise search degrades

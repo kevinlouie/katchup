@@ -42,6 +42,12 @@ type Syncer struct {
 	logger     *slog.Logger
 	locks      sync.Map // accountID → *sync.Mutex; serializes Run per account
 
+	// ThrottleCooldown is how long an account is skipped after the provider signals
+	// throttling. Defaults to 24h in NewSyncer; set to 0 to disable backoff.
+	ThrottleCooldown time.Duration
+	// FetchPacing is an optional delay between fetch batches (default 0 = none).
+	FetchPacing time.Duration
+
 	// runBody performs the actual folder-by-folder backup for an already-created
 	// run while the per-account lock is held. It is a field (defaulting to
 	// executeSync) so tests can stub the real IMAP work when exercising the
@@ -56,9 +62,72 @@ func NewSyncer(store *Store, dataDir string, keyWrapper crypto.KeyWrapper, encSt
 		keyWrapper: keyWrapper,
 		encStore:   encStore,
 		logger:     slog.Default(),
+
+		ThrottleCooldown: 24 * time.Hour,
 	}
 	s.runBody = s.executeSync
 	return s
+}
+
+// throttleMarkers are substrings (matched case-insensitively) that a provider
+// returns when rate-limiting or bandwidth-capping IMAP. They are deliberately
+// specific so a transient/unrelated error is not misread as a throttle (which
+// would suppress backups for the whole cooldown).
+var throttleMarkers = []string{
+	"bandwidth",
+	"over quota",
+	"overquota",
+	"too many simultaneous",
+	"too many connections",
+	"too many login",
+	"too many messages",
+}
+
+// isThrottleError reports whether an error message looks like provider throttling.
+func isThrottleError(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, k := range throttleMarkers {
+		if strings.Contains(m, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsThrottle reports whether any error in the slice looks like throttling.
+func containsThrottle(errs []string) bool {
+	for _, e := range errs {
+		if isThrottleError(e) {
+			return true
+		}
+	}
+	return false
+}
+
+// throttledUntil reports whether an account is in a throttle cooldown, based on
+// its most recent run being marked "throttled", and until when. Disabled when
+// ThrottleCooldown <= 0.
+func (s *Syncer) throttledUntil(ctx context.Context, accountID int64) (time.Time, bool) {
+	if s.ThrottleCooldown <= 0 {
+		return time.Time{}, false
+	}
+	runs, err := s.store.accountSt.ListRecentRuns(ctx, accountID)
+	if err != nil || len(runs) == 0 {
+		return time.Time{}, false
+	}
+	last := runs[0] // ordered started_at DESC, id DESC
+	if last.Status != "throttled" || last.FinishedAt == nil {
+		return time.Time{}, false
+	}
+	finished, err := time.Parse(time.DateTime, *last.FinishedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	until := finished.Add(s.ThrottleCooldown)
+	if time.Since(finished) < s.ThrottleCooldown {
+		return until, true
+	}
+	return time.Time{}, false
 }
 
 // lockFor returns the per-account execution mutex, creating it on first use. The
@@ -185,6 +254,17 @@ func (s *Syncer) beginRun(ctx context.Context, accountID int64) (account.Account
 // returned immediately) and executed in a background goroutine that releases the
 // per-account lock when done. The bool reports whether a new sync was started.
 func (s *Syncer) TriggerSync(ctx context.Context, accountID int64, coalesceWindow time.Duration) (runID int64, started bool, err error) {
+	// Respect an active throttle cooldown: don't let an on-demand trigger poke a
+	// provider that just rate-limited us. Return the throttled run id, not started.
+	if until, yes := s.throttledUntil(ctx, accountID); yes {
+		s.logger.Warn("sync trigger ignored, provider throttled — backing off",
+			"account_id", accountID, "until", until.UTC().Format(time.RFC3339))
+		if runs, lerr := s.store.accountSt.ListRecentRuns(ctx, accountID); lerr == nil && len(runs) > 0 {
+			return runs[0].ID, false, nil
+		}
+		return 0, false, nil
+	}
+
 	lock := s.lockFor(accountID)
 	if !lock.TryLock() {
 		// A sync is in flight (the lock is held for the whole run). Join it by
@@ -314,6 +394,7 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 	var errors []string
 	var emailsBackedUp int64
 	var lastUID int64
+	throttled := false
 
 	for _, folder := range folders {
 		folderLastUID, folderCount, folderErrs := s.syncFolder(ctx, acct, folder, syncRun.ID)
@@ -333,11 +414,25 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 				s.logger.Warn("failed to store folder sync state", "folder", folder, "error", err)
 			}
 		}
+
+		// Provider throttling: stop hitting it immediately and let the account
+		// cool down (the next sync is skipped until ThrottleCooldown elapses)
+		// rather than hammering the remaining folders into a longer ban.
+		if containsThrottle(folderErrs) {
+			throttled = true
+			s.logger.Warn("provider throttling detected — backing off",
+				"account_id", acct.ID, "folder", folder, "cooldown", s.ThrottleCooldown)
+			break
+		}
 	}
 
-	// Determine final status
+	// Determine final status. "throttled" is distinct from "partial" so the next
+	// sync can recognise the cooldown and skip instead of retrying into the ban.
 	finalStatus := "completed"
-	if len(errors) > 0 {
+	switch {
+	case throttled:
+		finalStatus = "throttled"
+	case len(errors) > 0:
 		finalStatus = "partial"
 	}
 
@@ -355,6 +450,12 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 		s.logger.Error("failed to update sync run status", "sync_run_id", syncRun.ID, "error", err)
 	}
 
+	// A throttle is an expected backoff, not a failure — the run is recorded as
+	// "throttled" and the account cools down. Don't surface it as an error.
+	if throttled {
+		s.logger.Warn("sync backed off (throttled)", "sync_run_id", syncRun.ID, "account_id", accountID, "emails_backed_up", emailsBackedUp)
+		return nil
+	}
 	if len(errors) > 0 {
 		return fmt.Errorf("sync completed with %d errors for account %d", len(errors), accountID)
 	}
@@ -510,6 +611,15 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 			}
 		}
 		s.logger.Info("sync progress", "folder", folder, "account_id", acct.ID, "done", count, "total", total)
+
+		// Optional pacing between batches to be gentler on provider rate limits.
+		if s.FetchPacing > 0 {
+			select {
+			case <-ctx.Done():
+				return safeWatermark, count, errs
+			case <-time.After(s.FetchPacing):
+			}
+		}
 	}
 
 	return watermark(maxSuccess, minFailed), count, errs
@@ -809,6 +919,12 @@ func (s *Syncer) SyncAll(ctx context.Context) {
 
 	for _, acctWithSync := range accounts {
 		acct := acctWithSync.Account
+
+		if until, yes := s.throttledUntil(ctx, acct.ID); yes {
+			s.logger.Warn("skipping account, provider throttled — backing off",
+				"account_id", acct.ID, "until", until.UTC().Format(time.RFC3339))
+			continue
+		}
 
 		if acctWithSync.IsSyncing {
 			s.logger.Debug("skipping account, sync already running", "account_id", acct.ID)

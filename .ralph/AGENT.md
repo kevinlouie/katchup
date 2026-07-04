@@ -209,6 +209,9 @@ make clean      # Remove build artifacts
 - (v2) KATCHUP_API_TOKEN — auth for /api/* via bearer header OR ?token= query param (support both); if unset, /api/* is 503 (fail closed)
 - (v2) KATCHUP_SYNC_INTERVAL — scheduled floor interval (default 6h); Hermes trigger drives freshness on top
 - (v2) MEILI_URL / MEILI_KEY — Meilisearch endpoint + key; if unset, /search falls back to SQLite LIKE
+- (v2) KATCHUP_THROTTLE_COOLDOWN — after a provider throttle (Gmail bandwidth/OVERQUOTA/too-many-connections), the run is marked status="throttled" and the account is SKIPPED (scheduled + trigger) until cooldown elapses (default 24h; 0 disables). Detection = isThrottleError substring match in imap/sync.go; guard = throttledUntil() reading ListRecentRuns[0].
+- (v2) KATCHUP_FETCH_PACING — optional inter-batch delay (default 0). Eases connection/rate limits; does NOT reduce bytes/day so won't prevent a bandwidth-cap throttle.
+- Subcommands: `katchup backfill` (rebuild blobs/messages/search + watermark from on-disk .eml.enc, no IMAP) and `katchup reindex` (push existing message headers to Meili, no decrypt). ENTRYPOINT is /app/katchup so `docker run ... backfill` / `docker exec <c> /app/katchup reindex`.
 - GET /health returns {"status":"ok"} for Docker HEALTHCHECK
 - Encrypted files use .eml.enc extension with version-prefixed binary format
 - Account store requires master key: account.New(db, masterKey)

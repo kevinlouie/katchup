@@ -49,19 +49,31 @@ type Config struct {
 	// search is never a hard dependency.
 	MeiliURL string
 	MeiliKey string
+	// ThrottleCooldown is how long to skip syncing an account after the provider
+	// signals throttling (e.g. Gmail's daily IMAP bandwidth cap). Retrying into the
+	// ban only prolongs it. Configurable via KATCHUP_THROTTLE_COOLDOWN (default 24h);
+	// set to 0 to disable throttle-aware backoff.
+	ThrottleCooldown time.Duration
+	// FetchPacing is an optional delay inserted between fetch batches to be gentler
+	// on the provider's connection/rate limits. Configurable via KATCHUP_FETCH_PACING
+	// (default 0 = no pacing). Note: it does not reduce total bytes/day, so it does
+	// not by itself prevent a bandwidth-cap throttle.
+	FetchPacing time.Duration
 }
 
 func Load() Config {
 	env := getEnv("KATCHUP_ENV", "development")
 	return Config{
-		DBPath:         getEnv("DB_PATH", "data/katchup.db"),
-		Listen:         getEnv("KATCHUP_LISTEN", ":8080"),
-		MasterKey:      os.Getenv("KATCHUP_MASTER_KEY"),
-		Environment:    env,
-		APIToken:       os.Getenv("KATCHUP_API_TOKEN"),
-		SyncInterval:   getDurationEnv("KATCHUP_SYNC_INTERVAL", 6*time.Hour),
-		CoalesceWindow: getDurationEnv("KATCHUP_COALESCE_WINDOW", 30*time.Second),
-		MeiliURL:       os.Getenv("MEILI_URL"),
-		MeiliKey:       os.Getenv("MEILI_KEY"),
+		DBPath:           getEnv("DB_PATH", "data/katchup.db"),
+		Listen:           getEnv("KATCHUP_LISTEN", ":8080"),
+		MasterKey:        os.Getenv("KATCHUP_MASTER_KEY"),
+		Environment:      env,
+		APIToken:         os.Getenv("KATCHUP_API_TOKEN"),
+		SyncInterval:     getDurationEnv("KATCHUP_SYNC_INTERVAL", 6*time.Hour),
+		CoalesceWindow:   getDurationEnv("KATCHUP_COALESCE_WINDOW", 30*time.Second),
+		MeiliURL:         os.Getenv("MEILI_URL"),
+		MeiliKey:         os.Getenv("MEILI_KEY"),
+		ThrottleCooldown: getDurationEnv("KATCHUP_THROTTLE_COOLDOWN", 24*time.Hour),
+		FetchPacing:      getDurationEnv("KATCHUP_FETCH_PACING", 0),
 	}
 }
