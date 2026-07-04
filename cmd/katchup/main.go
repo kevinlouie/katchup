@@ -99,6 +99,25 @@ func main() {
 		slog.Info("MEILI_URL not set — /search uses SQLite LIKE fallback")
 	}
 
+	// Subcommand: `katchup backfill` rebuilds the blobs/messages/search index
+	// from the encrypted .eml files already on disk, WITHOUT contacting IMAP,
+	// then exits. Use it to recover after a lost/reset DB without re-downloading
+	// (and re-triggering provider bandwidth throttling). Runs after the search
+	// backend is wired so it also repopulates Meilisearch.
+	if len(os.Args) > 1 && os.Args[1] == "backfill" {
+		slog.Info("running local backfill from disk (no IMAP)")
+		if keyWrapper == nil {
+			slog.Error("backfill requires KATCHUP_MASTER_KEY to decrypt on-disk files")
+			os.Exit(1)
+		}
+		if err := syncer.Backfill(ctx); err != nil {
+			slog.Error("backfill failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("backfill complete")
+		os.Exit(0)
+	}
+
 	// FIX #9: On startup, mark any stale "running" sync runs as "failed"
 	// so accounts aren't permanently blocked from syncing.
 	if err := syncer.MarkAllStaleRuns(ctx); err != nil {
