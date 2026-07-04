@@ -8,11 +8,12 @@ RALPH_API_LIMIT=100
 RALPH_LOOP_TIMEOUT=120
 
 ## Tool Permissions
-ALLOWED_TOOLS=Bash(go build *),Bash(go test *),Bash(sqlc generate),Bash(templ generate),Bash(go mod tidy),Bash(docker compose *),Read,Edit,Bash(make *),Grep,Glob,Write
+ALLOWED_TOOLS=Bash(go build *),Bash(go test *),Bash(sqlc generate),Bash(templ generate),Bash(go mod tidy),Bash(go get *),Bash(docker compose *),Read,Edit,Bash(make *),Grep,Glob,Write
 
 ## Sprints
-CURRENT_SPRINT="S6"
-SPRINT_ORDER="S1,S2,S3,S4,S5,S6"
+# v1 (S1-S6) complete & deployed. v2 = S7-S11 (see fix_plan.md).
+CURRENT_SPRINT="S7"
+SPRINT_ORDER="S7,S8,S9,S10,S11"
 
 ## Completion Criteria
 COMPLETION_INDICATORS=2

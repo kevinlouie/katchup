@@ -1,95 +1,57 @@
 # Encryption Specification
 
+## Reality note
+An earlier design called for YubiKey PIV + RSA-2048 key wrapping. **It was
+never implemented** — there is no PIV library, no `ykman` runtime path. The
+`FormatRSA = 0x01` branch exists as a stub but is never written. Katchup
+encrypts with a **master key only** (`FormatMasterKey = 0x02`). Treat PIV as a
+possible future format, not a current feature.
+
 ## Overview
-Katchup encrypts `.eml` files at rest using a hybrid encryption scheme backed by YubiKey PIV. The design ensures that plaintext email content and symmetric keys never leave the container, and the private key never leaves the YubiKey device.
+Katchup encrypts `.eml.enc` files at rest with AES-256-GCM. The content key is
+per-file (random) and wrapped by a key derived from `KATCHUP_MASTER_KEY`.
 
-## Architecture
-
-### Key Hierarchy
+## Key hierarchy (as built)
 ```
-YubiKey PIV Slot (9a, 9b, 9c, or 9d)
-  └── RSA-2048 key pair (generated on YubiKey, private key never exportable)
-        └── Public key encrypts content keys
-              └── AES-256-GCM content key encrypts .eml files
-```
-
-### Flow: Encrypt (during sync)
-1. Generate random 256-bit content key (CK)
-2. Encrypt file with CK using AES-256-GCM → `ciphertext` + `nonce` + `tag`
-3. Encrypt CK with YubiKey PIV public key using RSA-OAEP (SHA-256) → `encrypted_ck`
-4. Store `encrypted_ck` prefix (first 16 hex chars) in `account_encryption.encrypted_content_key_prefix`
-5. Write file: `nonce` (12 bytes) + `encrypted_ck` (256 bytes) + `tag` (16 bytes) + `ciphertext`
-
-### Flow: Decrypt (during download)
-1. Read file header: nonce, encrypted_ck_prefix, tag, ciphertext
-2. Look up `account_encryption` row matching account_id + encrypted_ck_prefix
-3. Send `encrypted_ck` to YubiKey PIV slot → YubiKey returns decrypted CK in-memory
-4. Use CK to AES-256-GCM decrypt ciphertext
-5. Serve decrypted .eml to user (CK discarded immediately)
-6. If no matching `account_encryption` row → try all known slots on the connected YubiKey
-
-## YubiKey PIV Integration
-
-### Library
-- `github.com/yubikit/yubikit-go/yubikit/piv`
-- Communicates via USB (PC/SC)
-
-### Slots
-| Slot ID | Purpose |
-|---------|---------|
-| 9a | Primary encryption (default) |
-| 9b | Secondary / backup YubiKey |
-| 9c | Tertiary / backup YubiKey |
-| 9d | Tertiary / backup YubiKey |
-
-Multiple slots enable multiple YubiKeys — each email stores the prefix of the encrypted content key, and the lookup finds which slot to use for decryption.
-
-### PIV Operations
-```go
-// Connect to YubiKey
-card, err := piv.Connect()
-
-// Get public key from slot (for encryption)
-pubKey, err := card.PublicKey(piv.SlotAuthentication, piv.CapabilityRSA, piv.RSA2048)
-
-// Decrypt content key (signature operation — YubiKey never outputs raw private key)
-decryptedCK, err := card.Sign(piv.SlotAuthentication, encryptedCK)
+KATCHUP_MASTER_KEY (env, required for encryption)
+  └── SHA-256(master key) = 32-byte key-wrapping key   (MasterKeyWrapper)
+        └── wraps a random 256-bit content key (CK) per file  (AES-256-GCM)
+              └── CK encrypts the .eml with AES-256-GCM
 ```
 
-### Key Injection (One-Time Setup)
-```bash
-# Generate RSA-2048 key in slot 9a
-ykman piv generate-key -a rsa2048 9a
-
-# Verify
-ykman piv information
+## File format (`FormatMasterKey = 0x02`)
+The `.eml.enc` file is **self-describing** — it carries its own wrapped content
+key. There is no external RSA blob and no dependency on the DB to decrypt beyond
+the master key.
 ```
-
-## File Format
-
-Each encrypted `.eml.enc` file:
+[version 0x02][wrapped-CK + nonce/tag][file nonce][ciphertext + GCM tag]
 ```
-+------------------+------------------+--------+------------------+
-| nonce (12 bytes) | encrypted_ck (256 bytes) | tag (16 bytes) | ciphertext (variable) |
-+------------------+------------------+--------+------------------+
-```
+- `crypto.EncryptFile` / `crypto.DecryptFile` handle the framing.
+- `KeyWrapper` is an interface; `MasterKeyWrapper` is the only implementation.
+  `NewMasterKeyWrapper(masterKey)` does `sha256.Sum256([]byte(masterKey))`.
 
-- `nonce` — AES-GCM nonce (12 bytes, random per file)
-- `encrypted_ck` — RSA-OAEP encrypted content key (256 bytes for RSA-2048)
-- `tag` — AES-GCM authentication tag (16 bytes, appended after ciphertext)
-- `ciphertext` — encrypted .eml content (variable length)
+## Dedup interaction (v2 / S7)
+- One content key per **blob** (per unique `sha256(raw)`), not per logical
+  message. A blob shared across folders is encrypted once; `messages` rows
+  reference it. Refcount governs deletion.
 
-## Encryption-at-Rest for Stored Credentials
+## Search interaction (v2 / S10)
+- Headers (to/from/subject/date/message-id) are indexed into Meilisearch in
+  plaintext (accepted on LAN). **Message bodies are NEVER indexed** — they stay
+  in the encrypted `.eml.enc` blobs only.
 
-IMAP passwords are stored encrypted in the `accounts` table. The encryption key is derived from:
-1. `KATCHUP_MASTER_KEY` environment variable (required), OR
-2. A host-derived key (fallback, less secure)
+## Stored credentials
+IMAP passwords are AES-256-GCM encrypted with the same master-key-derived key,
+stored as `nonce + ciphertext + tag` (hex) in `accounts.encrypted_password`.
+Decrypted only in-memory at connection time.
 
-Password encryption: AES-256-GCM with a random nonce per password. Stored as: `nonce` + `ciphertext` + `tag` (hex-encoded).
+## Operational
+- **Lose `KATCHUP_MASTER_KEY` = all `.eml.enc` and stored passwords are
+  unrecoverable.** Back it up out of band.
+- Plaintext never leaves the process; content keys are ephemeral per file.
 
-## Security Notes
-- Plaintext never leaves the container
-- Private keys never leave the YubiKey
-- Content keys are ephemeral — generated per-file, discarded after use
-- Multiple YubiKeys supported via slot-based key lookup
-- Passwords encrypted at rest with `KATCHUP_MASTER_KEY`
+## Vestigial schema
+The `account_encryption` table (yubikey_slot_id, slot_fingerprint,
+encrypted_content_key_prefix) is a leftover from the PIV design. It is not on
+the decrypt path for format 0x02. Leave it in place (harmless) but do not build
+new features on it.

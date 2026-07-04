@@ -51,7 +51,9 @@ func TestDownloadHandler_PathTraversal(t *testing.T) {
 	}
 }
 
-func TestBrowseHandler_Download_PathTraversal(t *testing.T) {
+func TestBrowseHandler_Download_InvalidID(t *testing.T) {
+	// Browse download now resolves messages by numeric id (blob.path lookup).
+	// Non-numeric ids are rejected before any DB/filesystem access.
 	dataDir := t.TempDir()
 
 	handler := &BrowseHandler{
@@ -60,24 +62,23 @@ func TestBrowseHandler_Download_PathTraversal(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		path     string
+		id       string
 		wantCode int
 	}{
-		{"valid path", "/browse/1/2024-01-01/2024-01-01_1.eml", http.StatusNotFound},
-		{"dotdot in filename", "/browse/1/2024-01-01/../../../etc/passwd", http.StatusBadRequest},
-		{"dotdot in folder", "/browse/1/../../etc/2024-01-01_1.eml", http.StatusBadRequest},
-		{"dotdot in account", "/browse/../etc/2024-01-01/2024-01-01_1.eml", http.StatusBadRequest},
-		{"backslash traversal", "/browse/1/2024-01-01/..\\..\\etc\\passwd", http.StatusBadRequest},
+		{"non-numeric", "not-a-number", http.StatusBadRequest},
+		{"empty", "", http.StatusBadRequest},
+		{"path traversal attempt", "../../etc/passwd", http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tt.path, nil)
+			req := httptest.NewRequest("GET", "/browse/download/x", nil)
+			req.SetPathValue("id", tt.id)
 			w := httptest.NewRecorder()
 			handler.Download(w, req)
 
 			if w.Code != tt.wantCode {
-				t.Errorf("path %q: got status %d, want %d (body: %s)", tt.path, w.Code, tt.wantCode, w.Body.String())
+				t.Errorf("id %q: got status %d, want %d (body: %s)", tt.id, w.Code, tt.wantCode, w.Body.String())
 			}
 		})
 	}
@@ -90,7 +91,7 @@ func TestBrowseHandler_Download_ServesDecryptedFile(t *testing.T) {
 	// but we can verify the handler exists and has the keyWrapper field.
 	dataDir := t.TempDir()
 
-	handler := NewBrowseHandler(nil, dataDir, nil)
+	handler := NewBrowseHandler(nil, nil, dataDir, nil)
 	if handler == nil {
 		t.Fatal("NewBrowseHandler returned nil")
 	}

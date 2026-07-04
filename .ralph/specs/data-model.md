@@ -4,6 +4,56 @@
 
 All tables use INTEGER PRIMARY KEY (auto-increment). Timestamps stored as TEXT in RFC3339/SQLite format, always in UTC.
 
+> **v2 note:** Migrations 001–002 are shipped. `account_encryption` is
+> **vestigial** (leftover PIV design — not on the decrypt path). `folder_sync_state`
+> (migration 002) holds the per-folder incremental watermark. Migration **003**
+> (Sprint S7) adds `blobs` + `messages` — the first real message index; until then
+> emails exist only as `.eml.enc` files on disk and `browse` walks the filesystem.
+> See `v2-architecture.md`. **We are staying on SQLite — not moving to Postgres.**
+
+## v2 tables (migration 003 — Sprint S7)
+
+### blobs — one row per unique encrypted file (per-account content-hash dedup)
+```sql
+CREATE TABLE blobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    sha256      TEXT NOT NULL,     -- hex SHA-256 over raw RFC822 bytes
+    path        TEXT NOT NULL,     -- relative path to the .eml.enc file
+    size        INTEGER NOT NULL,
+    refcount    INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, sha256)     -- dedup is PER-ACCOUNT
+);
+```
+
+### messages — one row per (account, folder, uid); many rows may share a blob
+```sql
+CREATE TABLE messages (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    folder         TEXT NOT NULL,
+    uid            INTEGER NOT NULL,
+    blob_id        INTEGER NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,
+    message_id_hdr TEXT,           -- RFC5322 Message-ID (Hermes correlation key)
+    fuzzy_fp       TEXT,           -- sha256(lower(from)|internal_date|lower(subject))
+    from_addr      TEXT,
+    to_addr        TEXT,
+    subject        TEXT,
+    internal_date  TEXT,
+    size           INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, folder, uid)
+);
+CREATE INDEX idx_messages_msgid ON messages(account_id, message_id_hdr);
+CREATE INDEX idx_messages_fuzzy ON messages(account_id, fuzzy_fp);
+CREATE INDEX idx_messages_date  ON messages(account_id, internal_date DESC);
+```
+
+`message_id_hdr` powers `GET /api/archived` (Hermes asks "is this archived?").
+`blobs.refcount` bumps when the same content appears in another folder (Gmail
+Inbox+All Mail, or a Hermes label/move) — no double-store.
+
 ## Tables
 
 ### accounts

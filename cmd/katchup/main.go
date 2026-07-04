@@ -17,6 +17,7 @@ import (
 	"katchup/internal/config"
 	"katchup/internal/crypto"
 	"katchup/internal/imap"
+	"katchup/internal/search"
 	migrations "katchup/sql/migrations"
 
 	"github.com/pressly/goose/v3"
@@ -81,20 +82,39 @@ func main() {
 	}
 	syncer := imap.NewSyncer(imapStore, dataDir, keyWrapper, store)
 
+	// Header-only search backend (S10). When MEILI_URL is set, messages are
+	// indexed on store and /search queries Meilisearch; otherwise search degrades
+	// to a SQLite LIKE over subject/from (no hard dependency). Only headers are
+	// ever indexed — bodies stay encrypted.
+	var searcher search.Searcher
+	if cfg.MeiliURL != "" {
+		meili := search.NewMeili(cfg.MeiliURL, cfg.MeiliKey)
+		if err := meili.EnsureIndex(ctx); err != nil {
+			slog.Warn("failed to initialize Meilisearch index; search falls back to DB until it recovers", "error", err)
+		}
+		imapStore.SetIndexer(meili)
+		searcher = meili
+		slog.Info("header-only search enabled via Meilisearch", "url", cfg.MeiliURL)
+	} else {
+		slog.Info("MEILI_URL not set — /search uses SQLite LIKE fallback")
+	}
+
 	// FIX #9: On startup, mark any stale "running" sync runs as "failed"
 	// so accounts aren't permanently blocked from syncing.
 	if err := syncer.MarkAllStaleRuns(ctx); err != nil {
 		slog.Warn("failed to clear stale runs at startup", "error", err)
 	}
 
-	// Start IMAP sync ticker (every 15 minutes)
+	// Start the scheduled-sync ticker. This is a SAFETY-NET FLOOR: Hermes drives
+	// freshness via POST /api/sync, but the floor guarantees a backup even if
+	// Hermes is down. Interval is configurable via KATCHUP_SYNC_INTERVAL (6h).
 	syncCtx, syncCancel := context.WithCancel(ctx)
 	go func() {
 		// Run immediately on startup
 		slog.Info("running initial sync")
 		syncer.SyncAll(syncCtx)
 
-		ticker := time.NewTicker(15 * time.Minute)
+		ticker := time.NewTicker(cfg.SyncInterval)
 		defer ticker.Stop()
 
 		for {
@@ -102,7 +122,7 @@ func main() {
 			case <-syncCtx.Done():
 				return
 			case <-ticker.C:
-				slog.Info("running scheduled sync")
+				slog.Info("running scheduled sync", "interval", cfg.SyncInterval)
 				syncer.SyncAll(syncCtx)
 			}
 		}
@@ -130,13 +150,32 @@ func main() {
 	mux.Handle("/sync/{id}/trigger", syncHandler)
 
 	// Register browse handler
-	browseHandler := api.NewBrowseHandler(store, dataDir, keyWrapper)
+	browseHandler := api.NewBrowseHandler(store, imapStore, dataDir, keyWrapper)
 	mux.Handle("/browse", browseHandler)
+	mux.HandleFunc("GET /browse/download/{id}", browseHandler.Download)
+
+	// Register header-only search handler (Meili when configured, DB LIKE fallback).
+	searchHandler := api.NewSearchHandler(store, imapStore, searcher)
+	mux.Handle("/search", searchHandler)
 
 	// Register download endpoints
 	dlHandler := api.NewDownloadHandler(store, imapStore, syncer, dataDir, keyWrapper)
 	mux.HandleFunc("GET /download/{accountID}/{date}/{filename}", dlHandler.Handle)
-	mux.HandleFunc("GET /browse/{accountID}/{date}/{filename}", browseHandler.Download)
+
+	// Register Hermes-facing API (/api/*). Wrapped in token auth that fails
+	// closed: if KATCHUP_API_TOKEN is unset, every /api/* route returns 503.
+	apiMux := http.NewServeMux()
+	archivedHandler := api.NewArchivedHandler(imapStore)
+	apiMux.HandleFunc("GET /api/archived", archivedHandler.Get)
+	apiMux.HandleFunc("POST /api/archived/lookup", archivedHandler.Lookup)
+	// On-demand sync trigger (Hermes pokes katchup before polling). Async 202 with
+	// the run id; per-account mutex + coalesce window guard against stampede.
+	syncTriggerHandler := api.NewSyncTriggerHandler(store, syncer, cfg.CoalesceWindow)
+	apiMux.HandleFunc("POST /api/sync", syncTriggerHandler.Trigger)
+	mux.Handle("/api/", api.APIAuth(cfg.APIToken, apiMux))
+	if cfg.APIToken == "" {
+		slog.Warn("KATCHUP_API_TOKEN not set — /api/* routes are disabled (503)")
+	}
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,

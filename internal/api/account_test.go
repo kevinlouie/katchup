@@ -87,6 +87,46 @@ func createTestTables(db *sql.DB) error {
 		);
 
 		CREATE INDEX idx_sync_runs_account ON sync_runs(account_id, started_at DESC);
+
+		CREATE TABLE folder_sync_state (
+			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			folder TEXT NOT NULL,
+			last_uid INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (account_id, folder)
+		);
+
+		CREATE TABLE blobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			sha256 TEXT NOT NULL,
+			path TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			refcount INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(account_id, sha256)
+		);
+
+		CREATE TABLE messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			folder TEXT NOT NULL,
+			uid INTEGER NOT NULL,
+			blob_id INTEGER NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,
+			message_id_hdr TEXT,
+			fuzzy_fp TEXT,
+			from_addr TEXT,
+			to_addr TEXT,
+			subject TEXT,
+			internal_date TEXT,
+			size INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(account_id, folder, uid)
+		);
+
+		CREATE INDEX idx_messages_msgid ON messages(account_id, message_id_hdr);
+		CREATE INDEX idx_messages_fuzzy ON messages(account_id, fuzzy_fp);
+		CREATE INDEX idx_messages_date  ON messages(account_id, internal_date DESC);
 	`)
 	return err
 }

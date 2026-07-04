@@ -230,12 +230,53 @@ func newTestBrowseHandler(t *testing.T) (*BrowseHandler, func()) {
 		t.Fatalf("new store: %v", err)
 	}
 
-	handler := NewBrowseHandler(store, dir, nil)
+	imapStore, err := imap.NewStore(db, store)
+	if err != nil {
+		t.Fatalf("new imap store: %v", err)
+	}
+
+	handler := NewBrowseHandler(store, imapStore, dir, nil)
 
 	return handler, func() {
 		db.Close()
 		os.RemoveAll(dir)
 	}
+}
+
+// seedMessage inserts a blob + message row and writes a matching file on disk
+// under handler.dataDir, mirroring what the sync path produces.
+func seedMessage(t *testing.T, h *BrowseHandler, accountID int64, folder, date string, uid int64, from, subject, body string) int64 {
+	t.Helper()
+	ctx := context.Background()
+
+	relPath := filepath.Join(fmt.Sprintf("%d", accountID), folder, fmt.Sprintf("%s_%d.eml", date, uid))
+	absPath := filepath.Join(h.dataDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(absPath, []byte(body), 0600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	sha := fmt.Sprintf("sha-%d-%d", accountID, uid)
+	blobID, err := h.imapStore.UpsertBlob(ctx, accountID, sha, relPath, int64(len(body)))
+	if err != nil {
+		t.Fatalf("upsert blob: %v", err)
+	}
+	if err := h.imapStore.InsertMessage(ctx, imap.InsertMessageParams{
+		AccountID:    accountID,
+		Folder:       folder,
+		UID:          uid,
+		BlobID:       blobID,
+		MessageIDHdr: fmt.Sprintf("<%d@test>", uid),
+		FromAddr:     from,
+		Subject:      subject,
+		InternalDate: date + "T12:00:00Z",
+		Size:         int64(len(body)),
+	}); err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
+	return blobID
 }
 
 func TestBrowseList(t *testing.T) {
@@ -288,17 +329,10 @@ func TestBrowseListWithFilter(t *testing.T) {
 		t.Fatalf("create account: %v", err)
 	}
 
-	// Create some test email files
-	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, fmt.Sprintf("%d", created.ID), "INBOX"), 0700)
-
 	for i := 0; i < 3; i++ {
-		filename := fmt.Sprintf("2026-07-01_%d.eml", 10000+i)
-		os.WriteFile(filepath.Join(dataDir, fmt.Sprintf("%d", created.ID), "INBOX", filename), []byte("test email content"), 0600)
+		seedMessage(t, handler, created.ID, "INBOX", "2026-07-01", int64(10000+i),
+			"sender@example.com", fmt.Sprintf("Subject %d", i), "test email content")
 	}
-
-	// Update handler to use the test data dir
-	handler.dataDir = dataDir
 
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/browse?account=%d", created.ID), nil)
 	w := httptest.NewRecorder()
@@ -312,28 +346,33 @@ func TestBrowseListWithFilter(t *testing.T) {
 	if !strings.Contains(body, "2026-07-01") {
 		t.Error("expected response to contain date '2026-07-01'")
 	}
+	if !strings.Contains(body, "sender@example.com") {
+		t.Error("expected response to contain sender address")
+	}
 }
 
 func TestBrowseDownload(t *testing.T) {
 	handler, cleanup := newTestBrowseHandler(t)
 	defer cleanup()
 
-	// Create test email files
-	dataDir := t.TempDir()
-	accountDir := filepath.Join(dataDir, "1", "INBOX")
-	os.MkdirAll(accountDir, 0700)
+	ctx := context.Background()
+	created, err := handler.store.CreateAccount(ctx, "DL", "imap.dl.com", 993, "dl@test.com", "encrypted-pass", true, []string{"INBOX"})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
 
 	testEmail := "From: test@example.com\nSubject: Test\n\nThis is a test email."
-	os.WriteFile(filepath.Join(accountDir, "2026-07-01_12345.eml"), []byte(testEmail), 0600)
+	seedMessage(t, handler, created.ID, "INBOX", "2026-07-01", 12345,
+		"test@example.com", "Test", testEmail)
 
-	handler.dataDir = dataDir
-
-	req := httptest.NewRequest(http.MethodGet, "/browse/1/INBOX/2026-07-01_12345.eml", nil)
+	// message id is 1 (first inserted row).
+	req := httptest.NewRequest(http.MethodGet, "/browse/download/1", nil)
+	req.SetPathValue("id", "1")
 	w := httptest.NewRecorder()
 	handler.Download(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", w.Code)
+		t.Fatalf("expected status 200, got %d (body: %s)", w.Code, w.Body.String())
 	}
 
 	if w.Header().Get("Content-Type") != "message/rfc822" {
@@ -342,7 +381,7 @@ func TestBrowseDownload(t *testing.T) {
 
 	body := w.Body.String()
 	if body != testEmail {
-		t.Error("expected response to contain test email content")
+		t.Errorf("expected response to contain test email content, got %q", body)
 	}
 }
 
@@ -350,14 +389,27 @@ func TestBrowseDownloadNotFound(t *testing.T) {
 	handler, cleanup := newTestBrowseHandler(t)
 	defer cleanup()
 
-	handler.dataDir = t.TempDir()
-
-	req := httptest.NewRequest(http.MethodGet, "/browse/1/INBOX/nonexistent.eml", nil)
+	req := httptest.NewRequest(http.MethodGet, "/browse/download/9999", nil)
+	req.SetPathValue("id", "9999")
 	w := httptest.NewRecorder()
 	handler.Download(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", w.Code)
+	}
+}
+
+func TestBrowseDownloadInvalidID(t *testing.T) {
+	handler, cleanup := newTestBrowseHandler(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/browse/download/not-a-number", nil)
+	req.SetPathValue("id", "not-a-number")
+	w := httptest.NewRecorder()
+	handler.Download(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
 	}
 }
 
@@ -494,17 +546,11 @@ func TestBrowseListPagination(t *testing.T) {
 		t.Fatalf("create account: %v", err)
 	}
 
-	// Create more than 50 test email files
-	dataDir := t.TempDir()
-	accountDir := filepath.Join(dataDir, fmt.Sprintf("%d", created.ID), "INBOX")
-	os.MkdirAll(accountDir, 0700)
-
+	// Create more than 50 messages
 	for i := 0; i < 55; i++ {
-		filename := fmt.Sprintf("2026-07-01_%d.eml", 10000+i)
-		os.WriteFile(filepath.Join(accountDir, filename), []byte("test email content"), 0600)
+		seedMessage(t, handler, created.ID, "INBOX", "2026-07-01", int64(10000+i),
+			"sender@example.com", fmt.Sprintf("Subject %d", i), "test email content")
 	}
-
-	handler.dataDir = dataDir
 
 	// Test first page
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/browse?account=%d&page=1", created.ID), nil)
@@ -549,18 +595,10 @@ func TestBrowseListAccountFilter(t *testing.T) {
 		t.Fatalf("create account: %v", err)
 	}
 
-	// Create test email files in the correct data directory structure
-	dataDir := t.TempDir()
-	accountDataDir := filepath.Join(dataDir, fmt.Sprintf("%d", created.ID))
-	folderDir := filepath.Join(accountDataDir, "INBOX")
-	os.MkdirAll(folderDir, 0700)
-
 	for i := 0; i < 3; i++ {
-		filename := fmt.Sprintf("2026-07-01_%d.eml", 10000+i)
-		os.WriteFile(filepath.Join(folderDir, filename), []byte("test email content"), 0600)
+		seedMessage(t, handler, created.ID, "INBOX", "2026-07-01", int64(10000+i),
+			"sender@example.com", fmt.Sprintf("Subject %d", i), "test email content")
 	}
-
-	handler.dataDir = dataDir
 
 	// Test with account filter
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/browse?account=%d", created.ID), nil)

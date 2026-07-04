@@ -30,6 +30,39 @@ type AccountEncryption struct {
 	CreatedAt                 string         `json:"created_at"`
 }
 
+type Blob struct {
+	ID        int64  `json:"id"`
+	AccountID int64  `json:"account_id"`
+	Sha256    string `json:"sha256"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	Refcount  int64  `json:"refcount"`
+	CreatedAt string `json:"created_at"`
+}
+
+type FolderSyncState struct {
+	AccountID int64  `json:"account_id"`
+	Folder    string `json:"folder"`
+	LastUid   int64  `json:"last_uid"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type Message struct {
+	ID           int64          `json:"id"`
+	AccountID    int64          `json:"account_id"`
+	Folder       string         `json:"folder"`
+	Uid          int64          `json:"uid"`
+	BlobID       int64          `json:"blob_id"`
+	MessageIDHdr sql.NullString `json:"message_id_hdr"`
+	FuzzyFp      sql.NullString `json:"fuzzy_fp"`
+	FromAddr     sql.NullString `json:"from_addr"`
+	ToAddr       sql.NullString `json:"to_addr"`
+	Subject      sql.NullString `json:"subject"`
+	InternalDate sql.NullString `json:"internal_date"`
+	Size         int64          `json:"size"`
+	CreatedAt    string         `json:"created_at"`
+}
+
 type SyncRun struct {
 	ID             int64          `json:"id"`
 	AccountID      int64          `json:"account_id"`

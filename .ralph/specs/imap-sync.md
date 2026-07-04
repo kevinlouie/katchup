@@ -1,130 +1,74 @@
 # IMAP Sync Specification
 
+## Reality note (v1 shipped, corrections from the original draft)
+- Sync is **non-mutating**: fetch uses `BODY.PEEK[]`, so it NEVER sets `\Seen`
+  and never issues STORE/APPEND/EXPUNGE. The original "mark as seen" step is
+  gone by design (katchup is a silent backup).
+- Fetch is **batched**: `fetchBatchSize = 200` UIDs/batch, `fetchTimeout = 120s`
+  per batch. Each batch persists its watermark (`folder_sync_state.last_uid`)
+  and progress (`MarkSyncRunProgress`) before the next. This replaced a single
+  bulk `UID FETCH` of all UIDs, which OOM'd/hung on large mailboxes.
+- An aborted/timed-out batch returns the last **safe watermark** (not the max
+  attempted UID) so unfetched UIDs retry next run.
+- `MarkAllStaleRuns` fails every `running` sync at startup (a sync can't survive
+  a process restart).
+
 ## Overview
-The sync worker connects to each configured IMAP account, fetches new/unseen emails, and stores them as `.eml` files on disk. Runs on a 15-minute schedule via a ticker in `main.go` (systemd timer can also trigger it).
+The sync worker connects to each configured IMAP account, fetches new messages,
+and stores them as encrypted `.eml.enc` files, indexed in the DB.
 
-## Sync Process
+## Sync process
+1. **Connect** — IMAPS (993) or STARTTLS (143), login with decrypted password.
+2. **Select folders** — per configured folder; skip-with-warning if missing.
+   For Gmail, prefer **All Mail** (retains everything regardless of labels — see
+   Hermes note below).
+3. **Discover UIDs** — `UID SEARCH` above `folder_sync_state.last_uid`.
+4. **Batched fetch** — in chunks of `fetchBatchSize`, `UID FETCH <range>
+   BODY.PEEK[]` (peek = no `\Seen`). Drain + persist per batch.
+5. **Store** — see "Message index + dedup" below.
+6. **Track state** — per batch: update `folder_sync_state.last_uid`,
+   `sync_runs.emails_backed_up` (`MarkSyncRunProgress`). At end: `completed` or
+   `failed` via `UpdateSyncRunStatus`.
 
-### 1. Connect
-- Dial IMAP server with TLS (port 993) or STARTTLS (port 143)
-- Login with username + decrypted password
-- Connection pool: one connection per account per sync run
+## Message index + dedup (v2 / S7)
+For each fetched message (raw RFC822 bytes `raw`):
+1. `h = SHA-256(raw)` (hex).
+2. Look up `blobs (account_id, sha256=h)`. If present → reuse (refcount++), do
+   NOT rewrite the file. Else encrypt+write `.eml.enc` and insert a blob.
+3. Insert a `messages` row: `(account_id, folder, uid, blob_id, message_id_hdr,
+   fuzzy_fp, from, to, subject, internal_date, size)`.
+   - `message_id_hdr` = RFC5322 `Message-ID` header.
+   - `fuzzy_fp` = `sha256(lower(from)|internal_date|lower(subject))`.
 
-### 2. Select Folders
-- For each configured folder (default: `INBOX`):
-  - `SELECT folder_name`
-  - If folder doesn't exist, skip with log warning
+## Scheduling & triggers (v2 / S9)
+- **Scheduled floor**: a ticker runs every `KATCHUP_SYNC_INTERVAL` (default
+  `6h`). This is the safety net — it must stay on even when Hermes drives.
+- **On-demand**: `POST /api/sync?account=<id>` → async 202 with run id.
+- **Per-account mutex**: at most one running sync per account. A trigger during
+  a running sync joins it; a trigger within the coalesce window (default 30s of
+  a completed run) returns that run. No stampede.
 
-### 3. Fetch New Messages
-- Use `UID SEARCH UNSEEN` to find unseen messages
-- For each UID returned:
-  - `UID FETCH <uid> RFC822` to get full message
-  - Check if `.eml` file already exists on disk (dedup)
-  - If new, write `.eml` file
-  - Mark as seen: `UID STORE <uid> +FLAGS (\Seen)`
+## Hermes note
+Hermes triages the live mailbox and only touches mail katchup has archived
+(it polls `/api/archived`). Because Hermes may label/move live mail, sync
+Gmail's **All Mail** so a move never hides an unarchived message.
 
-### 4. Write .eml Files
-- Path: `data/{account_id}/{folder}/{YYYY-MM-DD}_{uid}.eml`
-- Use atomic write: write to temp file, then rename
-- Permissions: `0600` (owner read/write only)
-
-### 5. Track State
-- Update `sync_runs.last_uid` with highest UID seen
-- Update `sync_runs.emails_backed_up` with count
-- On error, store error message and set `status = 'failed'`
-- On success, set `status = 'completed'`
-
-## Folder Mapping
-
-### Default
-Only `INBOX` is synced.
-
-### Configurable
-User specifies folders in the account's `folders` field (comma-separated):
-- `INBOX`
-- `Sent`
-- `Archive`
-- `Trash`
-- Custom folders
-
-Folder names are case-sensitive and server-dependent. Gmail uses `[Gmail]/Sent Mail`, `[Gmail]/Trash`, etc.
-
-## Deduplication
-
-### UID-Based
-- IMAP UIDs are unique per folder per account
-- Store `last_uid` per account in `sync_runs`
-- On next sync, use `UID SEARCH SINCE <date> UID <last_uid>+` to avoid re-scanning
-- If `last_uid` is 0 (first sync), fetch all unseen
-
-### File-Based
-- Check if `data/{account_id}/{folder}/{date}_{uid}.eml` exists before writing
-- Skip if exists (defensive, in case of partial sync)
-
-## Error Handling
-
-### Connection Errors
-- Retry with exponential backoff (3 attempts, 1s → 2s → 4s)
-- If all retries fail, log error and set sync status to `failed`
-- Next scheduled run will retry
-
-### Per-Message Errors
-- Log individual fetch failures (e.g., malformed message)
-- Continue with remaining messages
-- Store up to 5 error messages in `sync_runs.errors`
-
-### Timeout
-- IMAP connection timeout: 30 seconds
-- Fetch timeout per message: 60 seconds
-
-## Scheduled Execution
-
-### Ticker (in main.go)
-```go
-ticker := time.NewTicker(15 * time.Minute)
-defer ticker.Stop()
-
-go func() {
-    // Run immediately on startup
-    syncAll()
-    for range ticker.C {
-        syncAll()
-    }
-}()
-```
-
-### Manual Trigger
-- `POST /sync/{account_id}/trigger` starts a sync run in a goroutine
-- Returns immediately with 303 redirect
-- Running syncs are tracked in `sync_runs` with `status = 'running'`
-- Concurrent syncs: one per account (skip if already running)
-
-## File Layout
-
+## File layout
 ```
 data/
-├── katchup.db                    # SQLite database (gitignored)
-└── 1/                            # account_id directory
-    ├── INBOX/
-    │   ├── 2026-07-01_12345.eml
-    │   ├── 2026-07-01_12346.eml
-    │   └── 2026-07-02_12350.eml
-    ├── Sent/
-    │   └── 2026-07-01_12300.eml
-    └── .eml.enc                  # encrypted files (if encryption enabled)
-        ├── 2026-07-01_12345.eml.enc
-        └── 2026-07-01_12346.eml.enc
+├── katchup.db
+└── <account_id>/<folder>/<YYYY-MM-DD>_<uid>.eml.enc
 ```
+Atomic write (temp + rename), perms 0600.
+
+## Error handling
+- Connection: retry with backoff (3 attempts). All fail → run `failed`.
+- Per-message: log + continue; store up to 5 errors (bounded) in
+  `sync_runs.errors` via the `appendErr` helper.
+- Batch timeout: abort batch, keep safe watermark, retry next run.
 
 ## Testing
-
-### Mock IMAP Server
-Use `github.com/emersion/go-imap`'s built-in server for testing, or write a simple TCP listener that responds to IMAP commands.
-
-### Test Cases
-- Connect + fetch unseen + write .eml + update state
-- Dedup: second sync skips already-seen UIDs
-- Error: malformed message logged, continues with others
-- Error: connection timeout after retries, marks failed
-- Multiple folders: syncs all configured folders
-- STARTTLS vs IMAPS: both connection modes work
+- Dedup: second identical fetch → refcount 2, one file, one blob.
+- Non-mutating: fetch does not set `\Seen` (assert BODY.PEEK path).
+- Batched watermark: aborted batch resumes from safe watermark.
+- Trigger: concurrent triggers → one run.

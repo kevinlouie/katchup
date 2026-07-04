@@ -1,140 +1,195 @@
 # Ralph Fix Plan — Katchup
 
 ## IMPORTANT CONTEXT
-Katchup is a new project. No sprints complete yet.
+v1 (Sprints S1–S6) is COMPLETE and deployed to a Synology NAS as
+`ghcr.io/kevinlouie/katchup`. This plan now tracks **v2**: a proper message
+index, content-hash dedup, a Hermes-facing API, header-only full-text search,
+and a Gmail-API ingest fallback.
 
-Follow the sprint order: S1 → S2 → S3 → S4 → S5 → S6.
-Do not skip ahead — each sprint builds on the previous one.
+Sprint order for v2: **S7 → S8 → S9 → S10 → S11**. S8 depends on S7's schema.
+Hermes integration needs S8 + S9. S10 (search) and S11 (Gmail API) are
+independent and can trail.
 
----
-
-## Sprint S1: Core — Account CRUD + DB [COMPLETE]
-**Goal**: Database schema, account model, sqlc queries. Foundation for everything else.
-
-- [x] S1.1 Migration `001_initial.sql` — `accounts` table + `sync_runs` table
-- [x] S1.2 `sql/queries/account.sql` — CreateAccount, GetAccount, ListAccounts, UpdateAccount, DeleteAccount
-- [x] S1.3 `sql/queries/sync_run.sql` — CreateSyncRun, UpdateSyncRunStatus, ListRecentRuns
-- [x] S1.4 `sqlc generate` — `internal/database/account.sql.go` + `sync_run.sql.go`
-- [x] S1.5 `internal/config/config.go` — DB_PATH, KATCHUP_LISTEN env vars
-- [x] S1.6 `internal/account/store.go` — SQLite-backed account store (connect DB, run migrations, CRUD)
-- [x] S1.7 `internal/account/store_test.go` — Create/List/Get/Update/Delete tests
-- [x] S1.8 `go build ./...` clean
-
-**Tests:**
-| Function | Test | Type |
-|----------|------|------|
-| `CreateAccount` | inserts row, returns ID | Integration |
-| `GetAccount` | returns correct row by ID | Integration |
-| `ListAccounts` | returns all accounts | Integration |
-| `UpdateAccount` | modifies fields correctly | Integration |
-| `DeleteAccount` | removes row + cascades sync_runs | Integration |
+Reality corrections (the original specs described features that were never
+built — do not "restore" them):
+- **Encryption is master-key AES-256-GCM only** (`FormatMasterKey = 0x02`).
+  YubiKey PIV / RSA-2048 (`FormatRSA = 0x01`) was designed but NEVER
+  implemented — no PIV library, no `ykman` runtime path. Treat as dead.
+- **Sync is non-mutating**: fetch uses `BODY.PEEK[]`, never sets `\Seen`,
+  never STORE/APPEND/EXPUNGE.
+- **Dashboard lives at `/`** (not `/sync`).
+- **Fetch is batched** (200 UIDs/batch, 120s/batch timeout) with per-batch
+  watermark + progress persistence.
 
 ---
 
-## Sprint S2: IMAP Sync Worker [COMPLETE]
-**Goal**: Connect to IMAP, fetch emails, write .eml files, track sync state.
-
-- [x] S2.1 `internal/imap/sync.go` — `Syncer` struct with IMAP config, `Run(ctx)` method
-- [x] S2.2 IMAP connection: dial with TLS, login, select INBOX (and optionally other folders)
-- [x] S2.3 Fetch unseen messages: `UID SEARCH UNSEEN`, fetch headers + body as RFC822
-- [x] S2.4 Write `.eml` files: `data/{account_id}/{folder}/{timestamp}_{uid}.eml`
-- [x] S2.5 Dedup: skip UIDs already present in `data/`
-- [x] S2.6 `internal/imap/store.go` — persist `last_uid`, `last_sync_at`, `errors` per account
-- [x] S2.7 Integration in `cmd/katchup/main.go` — scheduled run loop (ticker every 15 min)
-- [x] S2.8 `go build ./...` clean; basic sync test against test server
-
-**Tests:**
-| Function | Test | Type |
-|----------|------|------|
-| `writeEML` | writes file with correct path format | Unit |
-| `emlPath` | generates correct file path | Unit |
-| `GetLastSyncState` | returns last completed sync UID | Integration |
-| `GetCurrentSyncRun` | returns running sync run or nil | Integration |
+## Post-v1 Hardening — ALREADY DONE (do NOT redo)
+- [x] Batched IMAP fetch (`fetchBatchSize=200`, `fetchTimeout=120s`) — fixed
+      the "stuck at 0 / OOM on 39k-message bulk fetch" bug.
+- [x] `BODY.PEEK[]` fetch — backup never marks live mail read.
+- [x] `MarkSyncRunProgress` — incremental progress without closing the run.
+- [x] `MarkAllStaleRuns` — fails every `running` run at startup (a sync can't
+      survive a restart).
+- [x] Dashboard moved to `GET /{$}`; UI redesigned (dark theme, ketchup accent).
+- [x] Docker image built + pushed to ghcr (amd64), deployed via docker compose.
 
 ---
 
-## Sprint S3: Encryption Layer [COMPLETE]
-**Goal**: YubiKey PIV encryption/decryption for .eml files at rest.
+## Sprint S7: Message Index + Content-Hash Dedup [DONE]
+**Goal**: Introduce a real message index and deduplicate identical mail by
+content hash. Foundation for S8/S9/S10.
 
-- [x] S3.1 `internal/crypto/yubikey.go` — `KeyWrapper` interface, `MasterKeyWrapper` struct, AES-256-GCM encrypt/decrypt
-- [x] S3.2 RSA-2048 key wrap support: `KeyWrapper` interface designed for YubiKey PIV (slot 9a); `MasterKeyWrapper` uses AES-GCM key wrap for dev mode
-- [x] S3.3 AES-256-GCM encrypt/decrypt: content key wraps/ unwraps the file
-- [x] S3.4 Store encryption metadata in DB: `account_encryption` table (slot_id, encrypted_content_key_prefix) + SQL queries + store methods
-- [x] S3.5 Integrate into sync: write encrypted .eml.enc, update metadata, encrypt stored passwords
-- [x] S3.6 Add decrypt endpoint: `GET /download/{accountID}/{date}/{filename}` — fetch, decrypt, serve .eml
-- [x] S3.7 `go build ./...` clean; all tests passing
+**Migration 003 (`003_message_index.sql`):**
+```sql
+CREATE TABLE blobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    sha256      TEXT NOT NULL,             -- hex of SHA-256 over raw RFC822 bytes
+    path        TEXT NOT NULL,             -- relative path to the .eml.enc file
+    size        INTEGER NOT NULL,
+    refcount    INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, sha256)             -- dedup key is PER-ACCOUNT
+);
+CREATE TABLE messages (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    folder         TEXT NOT NULL,
+    uid            INTEGER NOT NULL,
+    blob_id        INTEGER NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,
+    message_id_hdr TEXT,                   -- RFC5322 Message-ID header (indexed)
+    fuzzy_fp       TEXT,                   -- sha256(normalized from|date|subject)
+    from_addr      TEXT,
+    to_addr        TEXT,
+    subject        TEXT,
+    internal_date  TEXT,
+    size           INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, folder, uid)
+);
+CREATE INDEX idx_messages_msgid  ON messages(account_id, message_id_hdr);
+CREATE INDEX idx_messages_fuzzy  ON messages(account_id, fuzzy_fp);
+CREATE INDEX idx_messages_date   ON messages(account_id, internal_date DESC);
+```
 
-**Tests:**
-| Function | Test | Type |
-|----------|------|------|
-| `wrapContentKey`/`unwrap` | round-trip preserves 32-byte key | Unit |
-| `encryptFile`/`decryptFile` | round-trip preserves .eml content | Unit |
-| Encrypt large files (100KB) | preserves content integrity | Unit |
-| Decrypt wrong key | returns error | Unit |
-| Decrypt tampered file | returns error (GCM auth tag) | Unit |
-| `encryptPassword`/`decryptPassword` | round-trip preserves password | Unit |
-| `EncryptedKeyPrefix`/`MatchPrefix` | correct hex prefix extraction | Unit |
+- [x] S7.1 Migration 003 (above).
+- [x] S7.2 sqlc queries: `UpsertBlob` (insert or bump refcount, return id),
+      `InsertMessage`, `GetBlobBySha`, `ListMessages` (paginated, replaces the
+      filesystem walk), `CountMessages`.
+- [x] S7.3 Sync path: after fetching raw bytes, compute `sha256(raw)`. If a blob
+      for `(account_id, sha256)` exists → reuse it (bump refcount), do NOT
+      rewrite the file. Else write `.eml.enc` and insert blob.
+- [x] S7.4 Parse + store per message: `Message-ID`, `from`, `to`, `subject`,
+      `internal_date`, and `fuzzy_fp = sha256(lower(from)|internal_date|lower(subject))`.
+- [x] S7.5 Rewrite `browse` to read from `messages` (join `blobs`) instead of
+      walking the filesystem. Download resolves `blob.path`.
+- [x] S7.6 Backfill decision: **NUKE existing test data + re-sync** (current
+      inbox is a disposable test). Document in AGENT.md; no migration script for
+      old on-disk files.
+- [x] S7.7 `go build ./...` + `go test ./...` clean.
 
----
-
-## Sprint S4: Web UI — Accounts [COMPLETE]
-**Goal**: Account management UI — list, add, edit, delete accounts.
-
-- [x] S4.1 `internal/view/account/page.templ` — account list page + add/edit forms
-- [x] S4.2 `internal/api/account.go` — HTTP handlers for account CRUD
-- [x] S4.3 Routes: `GET /accounts`, `POST /accounts/new`, `GET /accounts/{id}/edit`, `POST /accounts/{id}/edit`, `POST /accounts/{id}/delete`
-- [x] S4.4 Password field: encrypted storage (use encryption module or simple env-key AES for stored credentials)
-- [x] S4.5 Nav link "Accounts" added to `internal/view/layout/base.templ`
-- [x] S4.6 `templ generate` + `go build ./...` clean
-
-**Tests:**
-| Function | Test | Type |
-|----------|------|------|
-| Account handlers | CRUD returns correct status codes + redirects | HTTP |
-| Add form | validates required fields | HTTP |
-
----
-
-## Sprint S5: Web UI — Sync + Browse [COMPLETE]
-**Goal**: Sync status dashboard, manual trigger, email browser.
-
-- [x] S5.1 `internal/view/sync/page.templ` — sync status per account + trigger sync button
-- [x] S5.2 `internal/view/browse/page.templ` — search/browse backed-up emails (list by date/account)
-- [x] S5.3 `GET /sync` — sync dashboard handler
-- [x] S5.4 `POST /sync/{account_id}/trigger` — manual sync trigger (async goroutine)
-- [x] S5.5 `GET /browse` — browse handler (list .eml files, paginate)
-- [x] S5.6 `GET /browse/{account_id}/{folder}/{filename}` — download decrypted .eml
-- [x] S5.7 Nav link "Sync" + "Browse" added to layout
-- [x] S5.8 `templ generate` + `go build ./...` clean
-
-**Tests:**
-| Function | Test | Type |
-|----------|------|------|
-| Sync handler | triggers sync, returns 303 | HTTP |
-| Browse handler | lists files, paginates | HTTP |
-| Browse download | serves email file | HTTP |
-| ParseEMLFilename | extracts date/UID from filename | Unit |
-| FormatSize | formats byte count | Unit |
+**Tests:** dedup skips second identical fetch (refcount=2, one file); message row
+per folder/uid; browse lists from DB; fuzzy_fp deterministic.
 
 ---
 
-## Sprint S6: Docker + Polish [COMPLETE]
-**Goal**: Production deployment with Docker, logging, health checks.
+## Sprint S8: Archived-Lookup API (Hermes read side) [DONE]
+**Goal**: Let Hermes ask "is this message archived?" so it only triages mail
+katchup already backed up. **Pull model** (Hermes holds + retries).
 
-- [x] S6.1 `Dockerfile` — multi-stage Alpine build
-- [x] S6.2 `docker-compose.yml` — service with volumes for data/
-- [x] S6.3 Non-root user in Docker
-- [x] S6.4 HEALTHCHECK with wget to `/health`
-- [x] S6.5 `log/slog` JSON handler for production (text for dev)
-- [x] S6.6 `GET /health` endpoint returning JSON
-- [x] S6.7 `.dockerignore` + `.gitignore` (data/, *.eml)
+- [x] S8.1 `GET /api/archived?message_id=<id>` →
+      `{archived: bool, archived_at, id, sha256}`. Match on `message_id_hdr`;
+      fall back to `fuzzy_fp` if a `fp=` param is given.
+- [x] S8.2 `POST /api/archived/lookup` with `{message_ids: [...]}` → map of
+      id→status (batch; Hermes checks many at once).
+- [x] S8.3 Auth: accept the token via EITHER `Authorization: Bearer
+      <KATCHUP_API_TOKEN>` OR `?token=<KATCHUP_API_TOKEN>` query param (Hermes
+      header support unconfirmed — support both). If the env var is unset,
+      `/api/*` returns 503 (fail closed) — never silently open.
+- [x] S8.4 Docs: instruct syncing Gmail's **All Mail** so Hermes label/moves
+      never hide an unarchived message from katchup. (See AGENT.md S8.4 note.)
+- [x] S8.5 Tests: archived hit/miss by message-id; fuzzy fallback; 401 without
+      token; 503 when token unset; batch lookup.
 
 ---
 
-## Completed
-- Sprint S1: Core — Account CRUD + DB
-- Sprint S2: IMAP Sync Worker
-- Sprint S3: Encryption Layer
-- Sprint S4: Web UI — Accounts
-- Sprint S5: Web UI — Sync + Browse
-- Sprint S6: Docker + Polish
+## Sprint S9: On-Demand Sync Trigger + Per-Account Mutex [DONE]
+**Goal**: Hermes pokes katchup to sync a mailbox before polling. Safe against
+stampede.
+
+- [x] S9.1 Per-account **sync mutex/guard**: at most one running sync per
+      account. Reuse `sync_runs` running-detection + an in-process lock. Run
+      creation ALWAYS happens under the per-account exec lock (`Syncer.lockFor`);
+      `beginRun` clears stale runs + rechecks the DB, so scheduled/trigger paths
+      can never both create a run.
+- [x] S9.2 `POST /api/sync?account=<id>` → **async 202** with the run id.
+      `Syncer.TriggerSync(ctx, accountID, coalesceWindow)`: TryLock the exec lock;
+      on success either coalesce onto a run finished < window ago or create a run
+      + launch a background goroutine that holds the lock and releases it when the
+      sync ends. On TryLock failure a sync is in flight → join it (return the
+      running run id). Handler in internal/api/sync_trigger.go returns
+      `{run_id, account_id, started}`.
+- [x] S9.3 Kept scheduled sync as a **safety-net floor** (main.go ticker); interval
+      configurable via `KATCHUP_SYNC_INTERVAL` (default `6h`, was hardcoded 15m).
+      Coalesce window via `KATCHUP_COALESCE_WINDOW` (default `30s`).
+- [x] S9.4 Token-auth: route registered on the same `APIAuth(cfg.APIToken, apiMux)`
+      wrapper as S8, so it inherits bearer/`?token=` auth + fail-closed 503.
+- [x] S9.5 Tests: concurrent triggers → one run; trigger during running sync →
+      joins; trigger within coalesce window → no new run; scheduled + trigger
+      don't double-run (internal/imap/trigger_test.go); handler 400/404/202-coalesce
+      (internal/api/sync_trigger_test.go).
+
+---
+
+## Sprint S10: Meilisearch — Header-Only Search [DONE]
+**Goal**: Full-text search over headers (to/from/subject), bodies stay
+encrypted and un-indexed.
+
+- [x] S10.1 `docker-compose.yml`: add a `meilisearch` service (internal network
+      only, `MEILI_MASTER_KEY` set, own volume). Still NO Postgres, NO Redis.
+      (getmeili/meilisearch:v1.10, no published host port, `meili_data` volume.)
+- [x] S10.2 On message store, push a doc:
+      `{id, account_id, folder, message_id, from, to, subject, date}` — **NO
+      body, NO attachment text**. `internal/search.Doc` has no body field;
+      `Store.InsertAndIndexMessage` pushes it best-effort after insert.
+- [x] S10.3 `GET /search?q=` UI: query Meili, render results, link each to
+      `/browse/download/{id}`. Filter by account. (`internal/api/search.go`,
+      `internal/view/search`.)
+- [x] S10.4 Config: `MEILI_URL`, `MEILI_KEY`. If unset (or Meili errors),
+      `/search` degrades to `SearchMessagesLike` (DB LIKE over subject/from).
+- [x] S10.5 Tests: index on store (injected fake indexer); LIKE fallback returns
+      matching subjects/from; indexed Doc JSON has no body field. Pass w/o Meili.
+
+---
+
+## Sprint S11: Gmail API Ingest Driver (insurance) [DECIDED: STUB]
+**Goal**: Belt-and-suspenders if Gmail ever drops IMAP. Not urgent — Gmail IMAP
+is always-on. **Decision: ship as a documented stub** (interface + spec, no
+implementation) until a Google Cloud OAuth client is provisioned.
+
+- [ ] S11.1 Define a `MailSource` interface; make current IMAP sync one impl.
+- [ ] S11.2 Gmail API impl: OAuth2 `gmail.readonly`, token storage + refresh,
+      `history.list` for incremental. Requires a Google Cloud OAuth client.
+- [ ] S11.3 Per-account `source` field (`imap` | `gmail_api`) selects the driver.
+- [ ] S11.4 May ship as a documented STUB if OAuth client credentials aren't
+      provisioned yet. Do not block S7–S10 on this.
+
+---
+
+## RESOLVED DECISIONS
+- **S7.6 backfill**: NUKE + re-sync. (Inbox is real but disposable; re-reading
+  is safe — `BODY.PEEK[]` means re-sync never marks live mail read.)
+- **S8/S9 auth**: `KATCHUP_API_TOKEN`, fail-closed. Accept via bearer header OR
+  `?token=` (Hermes header support unconfirmed — support both).
+- **S10**: Add Meilisearch now (accepted second container).
+- **S11**: Ship as a documented STUB (no OAuth client yet).
+
+---
+
+## Completed (v1)
+- S1 Core — Account CRUD + DB
+- S2 IMAP Sync Worker
+- S3 Encryption Layer (master-key AES-256-GCM; PIV never built)
+- S4 Web UI — Accounts
+- S5 Web UI — Sync + Browse
+- S6 Docker + Polish

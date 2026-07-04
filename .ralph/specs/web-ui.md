@@ -1,5 +1,23 @@
 # Web UI Specification
 
+> **v2 note:** The dashboard is served at **`/`** (not `/sync`). The account
+> add/edit form has **no YubiKey slot field** (PIV was never built). v2 adds a
+> `GET /search` page (S10) and a machine-facing `/api/*` surface (S8/S9) — see
+> the "v2 routes" table and `v2-architecture.md`.
+
+## v2 routes (Sprints S8–S10)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET  | `/api/archived?message_id=` | Bearer token | Is this message archived? `{archived, archived_at, id, sha256}` |
+| POST | `/api/archived/lookup` | Bearer token | Batch archived-status for `{message_ids[]}` |
+| POST | `/api/sync?account=` | Bearer token | Trigger a sync (async 202 + run id); per-account mutex + coalesce |
+| GET  | `/search?q=` | — (LAN) | Header-only full-text search (Meili, DB-LIKE fallback) |
+
+`/api/*` requires `KATCHUP_API_TOKEN` via bearer header OR `?token=` query param
+(support both — Hermes header support unconfirmed) and fails closed (503) if the
+token env var is unset. These are the Hermes-facing endpoints.
+
 ## Stack
 - **Templates**: templ (compiled Go templates)
 - **CSS**: Tailwind CSS via CDN

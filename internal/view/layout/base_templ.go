@@ -133,6 +133,7 @@ func nav(active string) string {
 			` + link("/", "Dashboard", "dashboard") + `
 			` + link("/accounts", "Accounts", "accounts") + `
 			` + link("/browse", "Browse", "browse") + `
+			` + link("/search", "Search", "search") + `
 		</nav>
 		<div class="ml-auto hidden items-center gap-2 font-mono text-[11px] uppercase tracking-widest text-mute sm:flex">
 			<span class="live-dot h-1.5 w-1.5 rounded-full bg-emerald-400"></span> archiving

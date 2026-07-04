@@ -33,27 +33,6 @@ func (q *Queries) CreateSyncRun(ctx context.Context, accountID int64) (SyncRun, 
 	return i, err
 }
 
-const markSyncRunProgress = `-- name: MarkSyncRunProgress :exec
-UPDATE sync_runs SET
-    emails_backed_up = ?1,
-    last_uid = ?2
-WHERE id = ?3
-`
-
-type MarkSyncRunProgressParams struct {
-	EmailsBackedUp int64         `json:"emails_backed_up"`
-	LastUid        sql.NullInt64 `json:"last_uid"`
-	ID             int64         `json:"id"`
-}
-
-// MarkSyncRunProgress records incremental progress on an in-flight run without
-// touching status or finished_at, so the run stays "running" and remains
-// eligible for stale-run cleanup if the process dies mid-sync.
-func (q *Queries) MarkSyncRunProgress(ctx context.Context, arg MarkSyncRunProgressParams) error {
-	_, err := q.db.ExecContext(ctx, markSyncRunProgress, arg.EmailsBackedUp, arg.LastUid, arg.ID)
-	return err
-}
-
 const listRecentRuns = `-- name: ListRecentRuns :many
 SELECT id, account_id, started_at, finished_at, emails_backed_up, errors, status, last_uid, created_at
 FROM sync_runs
@@ -93,6 +72,24 @@ func (q *Queries) ListRecentRuns(ctx context.Context, accountID int64) ([]SyncRu
 		return nil, err
 	}
 	return items, nil
+}
+
+const markSyncRunProgress = `-- name: MarkSyncRunProgress :exec
+UPDATE sync_runs SET
+    emails_backed_up = ?1,
+    last_uid = ?2
+WHERE id = ?3
+`
+
+type MarkSyncRunProgressParams struct {
+	EmailsBackedUp int64         `json:"emails_backed_up"`
+	LastUid        sql.NullInt64 `json:"last_uid"`
+	ID             int64         `json:"id"`
+}
+
+func (q *Queries) MarkSyncRunProgress(ctx context.Context, arg MarkSyncRunProgressParams) error {
+	_, err := q.db.ExecContext(ctx, markSyncRunProgress, arg.EmailsBackedUp, arg.LastUid, arg.ID)
+	return err
 }
 
 const updateSyncRunStatus = `-- name: UpdateSyncRunStatus :one

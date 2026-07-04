@@ -6,24 +6,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	"katchup/internal/account"
 	"katchup/internal/crypto"
+	"katchup/internal/imap"
 	browseView "katchup/internal/view/browse"
 )
 
 type BrowseHandler struct {
 	store      *account.Store
+	imapStore  *imap.Store
 	dataDir    string
 	keyWrapper crypto.KeyWrapper
 }
 
-func NewBrowseHandler(store *account.Store, dataDir string, keyWrapper crypto.KeyWrapper) *BrowseHandler {
+func NewBrowseHandler(store *account.Store, imapStore *imap.Store, dataDir string, keyWrapper crypto.KeyWrapper) *BrowseHandler {
 	return &BrowseHandler{
 		store:      store,
+		imapStore:  imapStore,
 		dataDir:    dataDir,
 		keyWrapper: keyWrapper,
 	}
@@ -45,11 +47,11 @@ func (h *BrowseHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var accountViews []browseView.AccountView
-	totalEmails := make(map[int64]int64)
-
 	for _, a := range accounts {
-		count := h.countEmailsForAccount(a.Account.ID)
-		totalEmails[a.Account.ID] = count
+		count, err := h.imapStore.CountMessagesByAccount(ctx, a.Account.ID)
+		if err != nil {
+			slog.Error("failed to count messages for account", "account_id", a.Account.ID, "error", err)
+		}
 		accountViews = append(accountViews, browseView.AccountView{
 			ID:     a.Account.ID,
 			Name:   a.Account.Name,
@@ -76,26 +78,41 @@ func (h *BrowseHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	perPage := 50
 
-	allEmails := h.scanEmails(accountID, dateStr)
+	total, err := h.imapStore.CountMessages(ctx, accountID, dateStr)
+	if err != nil {
+		slog.Error("failed to count messages", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
-	sort.Slice(allEmails, func(i, j int) bool {
-		if allEmails[i].Date != allEmails[j].Date {
-			return allEmails[i].Date > allEmails[j].Date
+	offset := int64((page - 1) * perPage)
+	if offset > total {
+		offset = total
+	}
+
+	msgs, err := h.imapStore.ListMessages(ctx, accountID, dateStr, int64(perPage), offset)
+	if err != nil {
+		slog.Error("failed to list messages", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	pageEmails := make([]browseView.EmailView, 0, len(msgs))
+	for _, m := range msgs {
+		date := m.InternalDate
+		if len(date) >= 10 {
+			date = date[:10]
 		}
-		return allEmails[i].Filename > allEmails[j].Filename
-	})
-
-	total := len(allEmails)
-
-	start := (page - 1) * perPage
-	if start > total {
-		start = total
+		pageEmails = append(pageEmails, browseView.EmailView{
+			ID:        m.ID,
+			Date:      date,
+			From:      m.FromAddr,
+			Subject:   m.Subject,
+			Folder:    m.Folder,
+			Size:      m.Size,
+			AccountID: m.AccountID,
+		})
 	}
-	end := start + perPage
-	if end > total {
-		end = total
-	}
-	pageEmails := allEmails[start:end]
 
 	data := browseView.PageData{
 		Title:     "Browse Emails",
@@ -105,7 +122,7 @@ func (h *BrowseHandler) List(w http.ResponseWriter, r *http.Request) {
 		Date:      dateStr,
 		Page:      page,
 		PerPage:   perPage,
-		Total:     total,
+		Total:     int(total),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -114,90 +131,19 @@ func (h *BrowseHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *BrowseHandler) scanEmails(accountID int64, dateStr string) []browseView.EmailView {
-	var results []browseView.EmailView
-
-	baseDir := h.dataDir
-
-	if err := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			return nil
-		}
-
-		name := info.Name()
-		if !strings.HasSuffix(name, ".eml") && !strings.HasSuffix(name, ".eml.enc") {
-			return nil
-		}
-
-		// Path structure: dataDir/{account_id}/{folder}/{filename}
-		dir := filepath.Dir(path)
-		accountDir := filepath.Dir(dir)
-		acctID, err := strconv.ParseInt(filepath.Base(accountDir), 10, 64)
-		if err != nil {
-			return nil
-		}
-
-		if accountID != 0 && acctID != accountID {
-			return nil
-		}
-
-		folder := filepath.Base(dir)
-
-		date, _, ok := parseEMLFilename(name)
-		if !ok {
-			return nil
-		}
-
-		if dateStr != "" && date != dateStr {
-			return nil
-		}
-
-		results = append(results, browseView.EmailView{
-			Date:      date,
-			Filename:  name,
-			Folder:    folder,
-			Size:      info.Size(),
-			AccountID: acctID,
-		})
-
-		return nil
-	}); err != nil {
-		slog.Error("failed to scan email directory", "error", err)
+// ServeHTTP implements http.Handler for the browse handler. Only the list at
+// /browse is dispatched here; downloads are wired to Download directly by
+// message id (/browse/download/{id}).
+func (h *BrowseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/browse" && r.Method == http.MethodGet {
+		h.List(w, r)
+		return
 	}
-
-	return results
+	http.NotFound(w, r)
 }
 
-func (h *BrowseHandler) countEmailsForAccount(accountID int64) int64 {
-	count := int64(0)
-
-	baseDir := h.dataDir
-	accountDir := filepath.Join(baseDir, strconv.FormatInt(accountID, 10))
-
-	if _, err := os.Stat(accountDir); os.IsNotExist(err) {
-		return 0
-	}
-
-	filepath.Walk(accountDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			return nil
-		}
-		name := info.Name()
-		if strings.HasSuffix(name, ".eml") || strings.HasSuffix(name, ".eml.enc") {
-			count++
-		}
-		return nil
-	})
-
-	return count
-}
-
+// parseEMLFilename splits a stored eml filename ("YYYY-MM-DD_<uid>.eml[.enc]")
+// into its date and uid parts. Retained as a helper for filename handling.
 func parseEMLFilename(name string) (date string, uid string, ok bool) {
 	name = strings.TrimSuffix(name, ".eml.enc")
 	name = strings.TrimSuffix(name, ".eml")
@@ -215,26 +161,6 @@ func parseEMLFilename(name string) (date string, uid string, ok bool) {
 	}
 
 	return date, uid, true
-}
-
-// ServeHTTP implements http.Handler for the browse handler.
-func (h *BrowseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-
-	switch {
-	case path == "/browse" && r.Method == http.MethodGet:
-		h.List(w, r)
-	case strings.HasPrefix(path, "/browse/") && r.Method == http.MethodGet:
-		// Check if this is a download path: /browse/{account_id}/{date}/{filename}
-		parts := strings.Split(strings.Trim(path, "/"), "/")
-		if len(parts) >= 4 {
-			h.Download(w, r)
-		} else {
-			http.NotFound(w, r)
-		}
-	default:
-		http.NotFound(w, r)
-	}
 }
 
 // formatSize formats a byte count to a human-readable string.
@@ -257,44 +183,40 @@ func formatSize(bytes int64) string {
 	}
 }
 
-// Download handles browsing to a specific email file and downloading it.
-// FIX #6: Validates path segments to prevent directory traversal.
-// FIX #13: Decrypts .eml.enc files instead of serving raw ciphertext.
+// Download serves a single archived message, resolved by message id. It looks up
+// the message's blob, reads blob.path (relative to the data dir), decrypts if
+// needed, and serves the plaintext .eml.
 func (h *BrowseHandler) Download(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 4 {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-
-	accountIDStr := parts[1]
-	folder := parts[2]
-	filename := parts[3]
-
-	accountID, err := strconv.ParseInt(accountIDStr, 10, 64)
-	if err != nil {
-		http.Error(w, "invalid account ID", http.StatusBadRequest)
-		return
-	}
-
-	// FIX #6: Validate each path segment to prevent directory traversal.
-	for _, seg := range []string{accountIDStr, folder, filename} {
-		if seg == "" || seg == "." || seg == ".." ||
-			strings.ContainsRune(seg, '/') || strings.ContainsRune(seg, '\\') ||
-			strings.Contains(seg, "..") {
-			http.Error(w, "invalid path", http.StatusBadRequest)
-			return
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		// Fallback: last path segment (e.g. /browse/download/{id}).
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) > 0 {
+			idStr = parts[len(parts)-1]
 		}
 	}
 
-	encPath := filepath.Join(h.dataDir, accountIDStr, folder, filename)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
 
-	// Double-check the resolved path is still under dataDir.
+	ctx := r.Context()
+	msg, err := h.imapStore.GetMessageWithBlob(ctx, id)
+	if err != nil {
+		http.Error(w, "message not found", http.StatusNotFound)
+		return
+	}
+
+	// blob.path is trusted (written by the sync path) but still confirm the
+	// resolved file stays under the data dir before reading it.
+	encPath := filepath.Join(h.dataDir, filepath.Clean(msg.BlobPath))
 	absDataDir, err := filepath.Abs(h.dataDir)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -319,7 +241,6 @@ func (h *BrowseHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FIX #13: Decrypt .eml.enc files before serving.
 	var plaintext []byte
 	if h.keyWrapper != nil {
 		plaintext, err = crypto.DecryptFile(encPath, h.keyWrapper)
@@ -337,12 +258,17 @@ func (h *BrowseHandler) Download(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sanitized := sanitizeFilename(filename)
+	sanitized := sanitizeFilename(filepath.Base(msg.BlobPath))
+	sanitized = strings.TrimSuffix(sanitized, ".enc")
+	sanitized = strings.TrimSuffix(sanitized, ".eml")
+	if sanitized == "" {
+		sanitized = fmt.Sprintf("message-%d", msg.ID)
+	}
 	w.Header().Set("Content-Type", "message/rfc822")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.eml\"", sanitized))
 	w.Header().Set("Content-Length", strconv.Itoa(len(plaintext)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(plaintext)
 
-	slog.Info("served email via browse", "account_id", accountID, "folder", folder, "filename", filename)
+	slog.Info("served email via browse", "message_id", msg.ID, "account_id", msg.AccountID, "folder", msg.Folder)
 }

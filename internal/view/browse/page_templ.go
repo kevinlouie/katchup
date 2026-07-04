@@ -33,8 +33,10 @@ type AccountView struct {
 }
 
 type EmailView struct {
+	ID        int64
 	Date      string
-	Filename  string
+	From      string
+	Subject   string
 	Folder    string
 	Size      int64
 	AccountID int64
@@ -100,8 +102,9 @@ func BrowsePage(data PageData) templ.Component {
 			<table class="w-full min-w-[640px] text-sm">
 				<thead><tr class="border-b border-white/10 text-left font-mono text-[11px] uppercase tracking-widest text-mute">
 					<th class="px-5 py-3.5 font-medium">Date</th>
+					<th class="px-5 py-3.5 font-medium">From</th>
+					<th class="px-5 py-3.5 font-medium">Subject</th>
 					<th class="px-5 py-3.5 font-medium">Folder</th>
-					<th class="px-5 py-3.5 font-medium">Message</th>
 					<th class="px-5 py-3.5 font-medium">Size</th>
 					<th class="px-5 py-3.5 text-right font-medium">Actions</th>
 				</tr></thead>
@@ -109,17 +112,18 @@ func BrowsePage(data PageData) templ.Component {
 		for _, e := range data.Emails {
 			fmt.Fprintf(&b, `<tr class="group transition-colors hover:bg-white/[0.025]">
 				<td class="px-5 py-3.5 font-mono text-xs text-zinc-300">%s</td>
+				<td class="px-5 py-3.5 text-xs text-zinc-300">%s</td>
+				<td class="px-5 py-3.5 text-xs text-zinc-200">%s</td>
 				<td class="px-5 py-3.5"><span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">%s</span></td>
-				<td class="px-5 py-3.5 font-mono text-xs text-mute">%s</td>
 				<td class="px-5 py-3.5 font-mono text-xs text-zinc-400 tabular-nums">%s</td>
 				<td class="px-5 py-3.5 text-right">
-					<a href="/browse/%d/%s/%s" class="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-ketchup/50 hover:bg-ketchup/10 hover:text-white">
+					<a href="/browse/download/%d" class="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-ketchup/50 hover:bg-ketchup/10 hover:text-white">
 						<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
 						Download
 					</a>
 				</td>
-			</tr>`, html.EscapeString(e.Date), html.EscapeString(orDash(e.Folder)), html.EscapeString(e.Filename), humanBytes(e.Size),
-				e.AccountID, html.EscapeString(e.Date), html.EscapeString(e.Filename))
+			</tr>`, html.EscapeString(e.Date), html.EscapeString(orDash(e.From)), html.EscapeString(orDash(e.Subject)), html.EscapeString(orDash(e.Folder)), humanBytes(e.Size),
+				e.ID)
 		}
 		b.WriteString(`</tbody></table></div>`)
 

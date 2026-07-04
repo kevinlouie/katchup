@@ -10,6 +10,16 @@ services:
       - KATCHUP_LISTEN=:8080
       - KATCHUP_ENV=production
       - KATCHUP_MASTER_KEY=${KATCHUP_MASTER_KEY}
+      # Bearer/query token for the Hermes-facing /api/* routes. If unset, /api/*
+      # fails closed (503). Set it in .env to enable the archived-lookup + sync API.
+      - KATCHUP_API_TOKEN=${KATCHUP_API_TOKEN}
+      # Header-only search backend. Reachable only on the internal compose network
+      # (the meilisearch service publishes no host port). If MEILI_URL is unset,
+      # /search degrades to a SQLite LIKE — no hard dependency.
+      - MEILI_URL=http://meilisearch:7700
+      - MEILI_KEY=${MEILI_MASTER_KEY}
+    depends_on:
+      - meilisearch
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -17,3 +27,24 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    # No ports published: search is internal-only, reachable by the katchup
+    # service over the default compose network at http://meilisearch:7700.
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+      - MEILI_ENV=production
+      - MEILI_NO_ANALYTICS=true
+    volumes:
+      - meili_data:/meili_data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  meili_data:
