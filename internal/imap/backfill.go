@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"net/mail"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"katchup/internal/crypto"
+	"katchup/internal/search"
 )
 
 // Backfill rebuilds the blobs + messages index (and the search index) from the
@@ -176,6 +178,58 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 
 	s.logger.Info("backfill done", "indexed", indexed, "skipped", skipped, "failed", failed)
 	return nil
+}
+
+// ReindexAll re-pushes every stored message's header-only doc to the search
+// backend. Use it to populate Meilisearch from an existing archive — e.g. after
+// a `backfill` that ran without Meili reachable, or after enabling search on an
+// already-populated database. It reads only the header fields already in the
+// messages table (no decrypt, no IMAP) and is a no-op when search is disabled.
+func (s *Store) ReindexAll(ctx context.Context) (int, error) {
+	if _, ok := s.indexer.(search.NoopIndexer); ok {
+		return 0, nil
+	}
+	accts, err := s.accountSt.ListAccounts(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list accounts: %w", err)
+	}
+	const page = 500
+	var indexed int
+	for _, a := range accts {
+		var offset int64
+		for {
+			if ctx.Err() != nil {
+				return indexed, ctx.Err()
+			}
+			msgs, err := s.ListMessages(ctx, a.ID, "", page, offset)
+			if err != nil {
+				return indexed, fmt.Errorf("list messages: %w", err)
+			}
+			if len(msgs) == 0 {
+				break
+			}
+			for i := range msgs {
+				m := msgs[i]
+				if err := s.indexer.Index(ctx, search.Doc{
+					ID:        m.ID,
+					AccountID: m.AccountID,
+					Folder:    m.Folder,
+					MessageID: m.MessageIDHdr,
+					From:      m.FromAddr,
+					To:        m.ToAddr,
+					Subject:   m.Subject,
+					Date:      m.InternalDate,
+				}); err != nil {
+					slog.Warn("reindex: index failed", "message_id", m.ID, "error", err)
+					continue
+				}
+				indexed++
+			}
+			offset += int64(len(msgs))
+			slog.Info("reindex progress", "indexed", indexed)
+		}
+	}
+	return indexed, nil
 }
 
 // parseUIDFromName extracts the UID from "<date>_<uid>.eml[.enc]". The date part

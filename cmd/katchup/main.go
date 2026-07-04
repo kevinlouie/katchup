@@ -118,6 +118,25 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Subcommand: `katchup reindex` re-pushes every stored message's header-only
+	// doc to Meilisearch (no decrypt, no IMAP), then exits. Use it to populate
+	// search from an existing archive — e.g. after a backfill that ran without
+	// Meili reachable.
+	if len(os.Args) > 1 && os.Args[1] == "reindex" {
+		slog.Info("reindexing search from existing messages")
+		if cfg.MeiliURL == "" {
+			slog.Error("reindex requires MEILI_URL to be set")
+			os.Exit(1)
+		}
+		n, err := imapStore.ReindexAll(ctx)
+		if err != nil {
+			slog.Error("reindex failed", "error", err, "indexed", n)
+			os.Exit(1)
+		}
+		slog.Info("reindex complete", "indexed", n)
+		os.Exit(0)
+	}
+
 	// FIX #9: On startup, mark any stale "running" sync runs as "failed"
 	// so accounts aren't permanently blocked from syncing.
 	if err := syncer.MarkAllStaleRuns(ctx); err != nil {
