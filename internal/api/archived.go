@@ -10,9 +10,9 @@ import (
 	"katchup/internal/imap"
 )
 
-// ArchivedHandler serves the Hermes-facing archived-lookup API. It answers
-// "has katchup already backed up this message?" so Hermes only triages mail that
-// is safely archived. Pull model: Hermes holds the queue and retries.
+// ArchivedHandler serves the machine-facing archived-lookup API. It answers
+// "has katchup already backed up this message?" so an external agent only acts
+// on mail that is safely archived. Pull model: the caller holds the queue and retries.
 type ArchivedHandler struct {
 	store *imap.Store
 }
@@ -58,10 +58,10 @@ func (h *ArchivedHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 // Lookup handles POST /api/archived/lookup with {message_ids:[...]}, returning a
-// map of message-id -> status so Hermes can check many at once.
+// map of message-id -> status so a caller can check many at once.
 func (h *ArchivedHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 	var req batchLookupRequest
-	// Lenient decode: Hermes payloads may carry extra fields we don't model —
+	// Lenient decode: caller payloads may carry extra fields we don't model —
 	// ignore them rather than 400 the whole batch.
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&req); err != nil {
@@ -130,11 +130,11 @@ func (h *ArchivedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// APIAuth wraps the Hermes-facing /api/* routes with token auth. It fails closed:
-// if the token is unset, EVERY /api/* request returns 503 (never silently open).
-// A valid token may be presented via either the "Authorization: Bearer <token>"
-// header OR the "?token=<token>" query param (Hermes header support unconfirmed —
-// support both).
+// APIAuth wraps the machine-facing /api/* routes with token auth. It fails
+// closed: if the token is unset, EVERY /api/* request returns 503 (never
+// silently open). The token must be presented as an "Authorization:
+// Bearer <token>" header — query-param tokens are not accepted because URLs
+// end up in access logs, proxies, and browser history.
 func APIAuth(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
@@ -149,15 +149,14 @@ func APIAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
-// extractToken pulls the presented token from the Authorization bearer header,
-// falling back to the ?token= query param.
+// extractToken pulls the presented token from the Authorization bearer header.
 func extractToken(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); h != "" {
 		if rest, ok := strings.CutPrefix(h, "Bearer "); ok {
 			return strings.TrimSpace(rest)
 		}
 	}
-	return strings.TrimSpace(r.URL.Query().Get("token"))
+	return ""
 }
 
 // validToken compares in constant time; an empty presented token never matches.

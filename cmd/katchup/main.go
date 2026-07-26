@@ -18,6 +18,7 @@ import (
 	"katchup/internal/crypto"
 	"katchup/internal/imap"
 	"katchup/internal/search"
+	"katchup/internal/view/static"
 	migrations "katchup/sql/migrations"
 
 	"github.com/pressly/goose/v3"
@@ -139,15 +140,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	// FIX #9: On startup, mark any stale "running" sync runs as "failed"
+	// On startup, mark any stale "running" sync runs as "failed"
 	// so accounts aren't permanently blocked from syncing.
 	if err := syncer.MarkAllStaleRuns(ctx); err != nil {
 		slog.Warn("failed to clear stale runs at startup", "error", err)
 	}
 
-	// Start the scheduled-sync ticker. This is a SAFETY-NET FLOOR: Hermes drives
-	// freshness via POST /api/sync, but the floor guarantees a backup even if
-	// Hermes is down. Interval is configurable via KATCHUP_SYNC_INTERVAL (6h).
+	// Start the scheduled-sync ticker. This is a SAFETY-NET FLOOR: an external
+	// agent drives freshness via POST /api/sync, but the floor guarantees a backup
+	// even if it is down. Interval is configurable via KATCHUP_SYNC_INTERVAL (6h).
 	syncCtx, syncCancel := context.WithCancel(ctx)
 	go func() {
 		// Run immediately on startup
@@ -173,6 +174,10 @@ func main() {
 
 	// Register health endpoint
 	mux.HandleFunc("GET /health", healthHandler)
+
+	// Vendored assets (Tailwind runtime + fonts), embedded in the binary —
+	// pages make no external network requests.
+	mux.Handle("GET /static/", static.Handler())
 
 	// Root path renders the dashboard (sync status overview).
 	syncHandler := api.NewSyncHandler(store, syncer)
@@ -202,13 +207,13 @@ func main() {
 	dlHandler := api.NewDownloadHandler(store, imapStore, syncer, dataDir, keyWrapper)
 	mux.HandleFunc("GET /download/{accountID}/{date}/{filename}", dlHandler.Handle)
 
-	// Register Hermes-facing API (/api/*). Wrapped in token auth that fails
+	// Register machine-facing API (/api/*). Wrapped in token auth that fails
 	// closed: if KATCHUP_API_TOKEN is unset, every /api/* route returns 503.
 	apiMux := http.NewServeMux()
 	archivedHandler := api.NewArchivedHandler(imapStore)
 	apiMux.HandleFunc("GET /api/archived", archivedHandler.Get)
 	apiMux.HandleFunc("POST /api/archived/lookup", archivedHandler.Lookup)
-	// On-demand sync trigger (Hermes pokes katchup before polling). Async 202 with
+	// On-demand sync trigger (an agent pokes katchup before polling). Async 202 with
 	// the run id; per-account mutex + coalesce window guard against stampede.
 	syncTriggerHandler := api.NewSyncTriggerHandler(store, syncer, cfg.CoalesceWindow)
 	apiMux.HandleFunc("POST /api/sync", syncTriggerHandler.Trigger)
@@ -217,9 +222,17 @@ func main() {
 		slog.Warn("KATCHUP_API_TOKEN not set — /api/* routes are disabled (503)")
 	}
 
+	// Web-UI auth: access key from KATCHUP_UI_KEY, or created on first visit
+	// and stored (hashed) in the DB. Wraps every route except /health, /login,
+	// and the separately token-guarded /api/*. The session cookie is
+	// SameSite=Lax, which also blocks cross-site request forgery against the
+	// state-changing POST routes.
+	uiAuth := api.NewUIAuth(db, cfg.UIKey)
+	uiAuth.RegisterRoutes(mux)
+
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: mux,
+		Handler: uiAuth.Middleware(mux),
 	}
 
 	go func() {

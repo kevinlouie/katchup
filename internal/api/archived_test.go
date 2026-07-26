@@ -243,9 +243,9 @@ func TestAPIAuth_401WithWrongOrAbsentToken(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer secret")
 			return r
 		}, true},
-		{"correct query", func() *http.Request {
+		{"query token no longer accepted", func() *http.Request {
 			return httptest.NewRequest(http.MethodGet, "/api/archived?message_id=x&token=secret", nil)
-		}, true},
+		}, false},
 	}
 
 	for _, tc := range cases {

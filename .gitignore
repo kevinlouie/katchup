@@ -6,6 +6,12 @@ data/
 *.eml
 *.eml.enc
 
+# Secrets — the quick-start writes these next to the repo
+.env
+
+# Local agent settings
+.claude/
+
 # IDE
 .idea/
 .vscode/

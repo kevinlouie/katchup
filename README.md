@@ -35,7 +35,7 @@ touches the live account.
 | IMAP | `github.com/emersion/go-imap` v1 |
 | Search | Meilisearch (optional; **headers only**), stdlib HTTP client |
 | Encryption | AES-256-GCM, per-file content key wrapped by a master key |
-| UI | Server-rendered templates, Tailwind (CDN), dark theme |
+| UI | Server-rendered templates, Tailwind + fonts vendored & embedded (no CDN, works offline), dark theme |
 | Deploy | Multi-stage Alpine Docker image, non-root, healthcheck |
 
 ### Storage layout
@@ -49,10 +49,12 @@ data/
 
 ```bash
 # 1. Secrets — generate strong random values, store them somewhere safe.
+#    (.env is gitignored; keep it out of any repo regardless.)
 cat > .env <<EOF
 KATCHUP_MASTER_KEY=$(openssl rand -hex 32)   # encrypts all mail — see warning below
 MEILI_MASTER_KEY=$(openssl rand -hex 32)     # required if you run search
 KATCHUP_API_TOKEN=$(openssl rand -hex 32)    # enables the /api/* automation surface
+KATCHUP_UI_KEY=$(openssl rand -hex 16)       # web-UI access key (or set one on first visit)
 EOF
 
 # 2. Bring it up (katchup + meilisearch).
@@ -77,8 +79,9 @@ All configuration is environment variables — no config files.
 | `DB_PATH` | `data/katchup.db` | SQLite database path |
 | `KATCHUP_LISTEN` | `:8080` | HTTP listen address |
 | `KATCHUP_ENV` | `development` | `production` enables JSON structured logging |
-| `KATCHUP_MASTER_KEY` | — | **Required for encryption.** Wraps per-file content keys |
-| `KATCHUP_API_TOKEN` | — | Bearer/query token for `/api/*`. **Unset ⇒ `/api/*` returns 503** (fail closed) |
+| `KATCHUP_MASTER_KEY` | — | **Required for encryption.** Wraps per-file content keys. ⚠️ Unset ⇒ mail **and IMAP passwords** are stored in plaintext |
+| `KATCHUP_UI_KEY` | — | Web-UI access key. Unset ⇒ the UI asks you to create one on first visit (hash stored in the DB) |
+| `KATCHUP_API_TOKEN` | — | Bearer token for `/api/*`. **Unset ⇒ `/api/*` returns 503** (fail closed) |
 | `KATCHUP_SYNC_INTERVAL` | `6h` | Scheduled-sync safety-net floor |
 | `KATCHUP_COALESCE_WINDOW` | `30s` | Ignore a trigger this soon after a run finished |
 | `MEILI_URL` | — | Meilisearch endpoint. Unset ⇒ `/search` falls back to a SQLite `LIKE` |
@@ -86,8 +89,11 @@ All configuration is environment variables — no config files.
 
 ## Web routes
 
+All web routes (everything except `/health` and `/api/*`) require login.
+
 | Path | Description |
 |---|---|
+| `GET /login`, `POST /logout` | Unlock / lock the UI (first visit: create the access key) |
 | `GET /` | Dashboard — accounts, sync status, totals |
 | `GET /accounts`, `…/new`, `…/{id}/edit`, `…/{id}/delete` | Mailbox management |
 | `GET /sync`, `POST /sync/{id}/trigger` | Sync status + manual trigger (UI) |
@@ -99,9 +105,9 @@ All configuration is environment variables — no config files.
 ## Automation API (`/api/*`)
 
 Machine-facing endpoints for an external triage agent. **All require a token**,
-supplied as either `Authorization: Bearer <KATCHUP_API_TOKEN>` or
-`?token=<KATCHUP_API_TOKEN>`. If `KATCHUP_API_TOKEN` is unset, every `/api/*`
-route returns **503** — it never silently opens.
+supplied as `Authorization: Bearer <KATCHUP_API_TOKEN>` (query-param tokens are
+not accepted — URLs end up in logs). If `KATCHUP_API_TOKEN` is unset, every
+`/api/*` route returns **503** — it never silently opens.
 
 | Endpoint | Description |
 |---|---|
@@ -153,12 +159,21 @@ sqlc-generated code lives in `internal/database/` — don't hand-edit it.
 
 ## Security posture
 
-- Designed for a **trusted LAN** (e.g. behind Tailscale). The web UI has no
-  authentication — do **not** port-forward it to the internet.
-- The `/api/*` surface *is* token-guarded and fails closed.
+- Designed for a **trusted LAN** (e.g. behind Tailscale). Even so, do **not**
+  port-forward it to the internet.
+- The web UI requires an access key (`KATCHUP_UI_KEY`, or created on first
+  visit). The session cookie is `HttpOnly` + `SameSite=Lax`, which also blocks
+  cross-site request forgery against the state-changing routes.
+- The `/api/*` surface is token-guarded (Bearer header only) and fails closed.
+- **Set `KATCHUP_MASTER_KEY`, and make it a random value** (e.g.
+  `openssl rand -hex 32`). It is stretched with a plain SHA-256, not a
+  password KDF — a short human passphrase weakens every blob. Without a master
+  key, mail *and* stored IMAP passwords are written in plaintext.
 - Plaintext and content keys never leave the process; content keys are
   ephemeral per file.
 
 ## License
 
-Private project. All rights reserved.
+[MIT](LICENSE). Vendored UI assets carry their own licenses: Tailwind CSS
+(MIT), Bricolage Grotesque / Instrument Sans / JetBrains Mono (SIL OFL 1.1) —
+see `internal/view/static/assets/`.

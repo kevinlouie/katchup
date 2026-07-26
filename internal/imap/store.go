@@ -294,7 +294,7 @@ func (s *Store) GetMessageWithBlob(ctx context.Context, id int64) (Message, erro
 	}, nil
 }
 
-// Archived is the archived-lookup result for one message (Hermes read side).
+// Archived is the archived-lookup result for one message (API read side).
 type Archived struct {
 	ID         int64  // katchup messages row id
 	ArchivedAt string // when katchup stored it (messages.created_at)

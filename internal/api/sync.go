@@ -100,7 +100,7 @@ func (h *SyncHandler) Status(w http.ResponseWriter, r *http.Request) {
 			Username:       a.Account.Username,
 			Folders:        foldersStr,
 			IsSyncing:      a.IsSyncing,
-			LastSyncAt:      lastSyncAt,
+			LastSyncAt:     lastSyncAt,
 			LastUID:        lastUID,
 			EmailsBackedUp: emailsBackedUp,
 			Errors:         errors,
@@ -144,7 +144,7 @@ func (h *SyncHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FIX #11: Use context.Background() instead of r.Context().
+	// Use context.Background() instead of r.Context().
 	// r.Context() is cancelled as soon as the HTTP response is written
 	// (the redirect), so the background sync's DB calls would all fail.
 	go func() {

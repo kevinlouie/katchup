@@ -12,7 +12,7 @@ import (
 	"katchup/internal/imap"
 )
 
-// SyncTriggerHandler serves the Hermes-facing POST /api/sync trigger. Hermes
+// SyncTriggerHandler serves the machine-facing POST /api/sync trigger. A caller
 // pokes katchup to sync a mailbox before polling; the handler is safe against
 // stampede (per-account mutex + coalesce window) and never blocks on the sync.
 type SyncTriggerHandler struct {
@@ -29,7 +29,7 @@ func NewSyncTriggerHandler(store *account.Store, syncer *imap.Syncer, coalesceWi
 	}
 }
 
-// syncTriggerResponse is the 202 body returned to Hermes.
+// syncTriggerResponse is the 202 body returned to the caller.
 type syncTriggerResponse struct {
 	RunID     int64 `json:"run_id"`
 	AccountID int64 `json:"account_id"`

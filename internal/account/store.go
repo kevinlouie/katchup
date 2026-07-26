@@ -392,12 +392,12 @@ func trim(s string) string {
 
 // Encryption represents encryption metadata for an account.
 type Encryption struct {
-	ID                       int64
-	AccountID                int64
-	YubikeySlotID            string
-	SlotFingerprint          string
+	ID                        int64
+	AccountID                 int64
+	YubikeySlotID             string
+	SlotFingerprint           string
 	EncryptedContentKeyPrefix string
-	CreatedAt                string
+	CreatedAt                 string
 }
 
 func toEncryption(enc database.AccountEncryption) Encryption {

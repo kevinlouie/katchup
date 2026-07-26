@@ -8,30 +8,27 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 )
 
 const (
-	// File format version 1: RSA-OAEP key wrap (YubiKey PIV)
-	FormatRSA = 0x01
-	// File format version 2: AES master key wrap (no YubiKey)
+	// FormatMasterKey is the .eml.enc file format version byte: AES master key
+	// wrap. (0x01 was reserved for a YubiKey PIV RSA wrap that never shipped.)
 	FormatMasterKey = 0x02
 
 	// AES-GCM constants
-	nonceSize        = 12
-	tagSize          = 16
-	rsaKeySize       = 256 // RSA-2048 encrypted key size
-	aesKeySize       = 32 // AES-256 key size in bytes
-	masterWrapSize   = nonceSize + aesKeySize + tagSize // AES-GCM seal output: nonce + ciphertext + tag
-	masterKeyPrefixLen = 16 // hex chars stored as prefix for DB lookup
+	nonceSize          = 12
+	tagSize            = 16
+	aesKeySize         = 32                               // AES-256 key size in bytes
+	masterWrapSize     = nonceSize + aesKeySize + tagSize // AES-GCM seal output: nonce + ciphertext + tag
+	masterKeyPrefixLen = 16                               // hex chars stored as prefix for DB lookup
 )
 
 var (
-	ErrNoMasterKey = errors.New("crypto: KATCHUP_MASTER_KEY is not set")
+	ErrNoMasterKey      = errors.New("crypto: KATCHUP_MASTER_KEY is not set")
 	ErrDecryptionFailed = errors.New("crypto: decryption failed — invalid tag or wrong key")
-	ErrUnknownFormat = errors.New("crypto: unknown file format version")
+	ErrUnknownFormat    = errors.New("crypto: unknown file format version")
 )
 
 // KeyWrapper wraps and unwraps a 32-byte content key.
@@ -58,9 +55,12 @@ func NewMasterKeyWrapper(masterKey string) (*MasterKeyWrapper, error) {
 		return nil, ErrNoMasterKey
 	}
 	h := sha256.Sum256([]byte(masterKey))
+	// The fingerprint is derived through a second, domain-separated hash so the
+	// stored/displayed value shares no bytes with the actual encryption key.
+	fp := sha256.Sum256([]byte("katchup-fingerprint:" + masterKey))
 	return &MasterKeyWrapper{
 		key:    h[:],
-		finger: hex.EncodeToString(h[:4]),
+		finger: hex.EncodeToString(fp[:4]),
 	}, nil
 }
 
@@ -76,7 +76,7 @@ func (m *MasterKeyWrapper) Wrap(ck []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// FIX #5: Use a random nonce instead of all-zeros.
+	// Use a random nonce.
 	// All-zero nonces with the same content key under the same master key
 	// leak the XOR of plaintexts and enable authentication-key
 	// distinguishability attacks. gcm.Seal prepends the nonce to the
@@ -107,7 +107,7 @@ func (m *MasterKeyWrapper) Unwrap(encrypted []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-func (m *MasterKeyWrapper) ID() string        { return "master" }
+func (m *MasterKeyWrapper) ID() string          { return "master" }
 func (m *MasterKeyWrapper) Fingerprint() string { return m.finger }
 
 // GenerateContentKey returns a random 256-bit content key.
@@ -152,14 +152,12 @@ func EncryptFile(path string, plaintext []byte, wrapper KeyWrapper) error {
 
 	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
 
-	// Determine version byte.
-	var version byte
-	switch wrapper.(type) {
-	case *MasterKeyWrapper:
-		version = FormatMasterKey
-	default:
-		version = FormatRSA
+	// Version byte: only the master-key wrap format exists. A future wrapper
+	// type must claim its own version byte here.
+	if _, ok := wrapper.(*MasterKeyWrapper); !ok {
+		return fmt.Errorf("crypto: no file format version for wrapper %q", wrapper.ID())
 	}
+	version := byte(FormatMasterKey)
 
 	// Determine directory for temp file (must be same device as target for atomic rename).
 	dir := filepath.Dir(path)
@@ -219,8 +217,6 @@ func DecryptBytes(data []byte, wrapper KeyWrapper) ([]byte, error) {
 
 	var wrappedCKSize int
 	switch version {
-	case FormatRSA:
-		wrappedCKSize = rsaKeySize
 	case FormatMasterKey:
 		wrappedCKSize = masterWrapSize // ciphertext + GCM tag from sealing
 	default:
@@ -331,15 +327,3 @@ func EncryptedKeyPrefix(encryptedCK []byte) string {
 func MatchPrefix(encryptedCK, prefix string) bool {
 	return len(encryptedCK) >= len(prefix) && string(encryptedCK[:len(prefix)]) == prefix
 }
-
-func indexOfByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
-
-// Ensure io is used.
-var _ = io.EOF

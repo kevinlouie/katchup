@@ -1,8 +1,8 @@
 package api
 
 import (
-	"errors"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -113,7 +113,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 		errs = append(errs, "Password is required")
 	}
 
-	// Parse port — FIX #16: use the actual port from the form value
+	// Parse port: use the actual port from the form value
 	// or connection selection, not a default of 993.
 	port := int64(143) // default to plaintext unless overridden
 	if connection != "" {
@@ -144,6 +144,12 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if len(folders) == 0 {
 		folders = []string{"INBOX"}
 	}
+	for _, f := range folders {
+		if invalidFolderName(f) {
+			errs = append(errs, "Invalid folder name: "+f)
+			break
+		}
+	}
 
 	if len(errs) > 0 {
 		data := acctView.PageData{
@@ -157,7 +163,7 @@ func (h *AccountHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FIX #14: Encrypt password only if master key is configured.
+	// Encrypt password only if master key is configured.
 	// Without a master key, store the password as plaintext (no encryption).
 	var encryptedPass string
 	var encErr error
@@ -302,7 +308,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	// Password is optional on update — blank keeps the stored one.
 
-	// Parse port — FIX #16: default to 143 (STARTTLS), not 993.
+	// Parse port — default to 143 (STARTTLS), not 993.
 	port := int64(143)
 	if connection != "" {
 		port = parsePort(connection)
@@ -331,6 +337,12 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if len(folders) == 0 {
 		folders = []string{"INBOX"}
 	}
+	for _, f := range folders {
+		if invalidFolderName(f) {
+			errs = append(errs, "Invalid folder name: "+f)
+			break
+		}
+	}
 
 	if len(errs) > 0 {
 		view := acctView.AccountView{
@@ -356,7 +368,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FIX #15: Only encrypt and use new password if provided.
+	// Only encrypt and use new password if provided.
 	// Otherwise, keep the existing encrypted password.
 	encryptedPass := existing.EncryptedPassword
 	if password != "" {
@@ -444,6 +456,21 @@ func (h *AccountHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("deleted account", "id", id)
 	http.Redirect(w, r, "/accounts", http.StatusSeeOther)
+}
+
+// invalidFolderName rejects folder values that could escape the data directory
+// when the folder is used as an on-disk path segment ("..", absolute paths,
+// backslashes). IMAP hierarchy names like "[Gmail]/All Mail" stay valid.
+func invalidFolderName(f string) bool {
+	if strings.HasPrefix(f, "/") || strings.Contains(f, "\\") || strings.ContainsRune(f, 0) {
+		return true
+	}
+	for _, seg := range strings.Split(f, "/") {
+		if seg == ".." || seg == "." {
+			return true
+		}
+	}
+	return false
 }
 
 // parsePort converts a connection value to a port number.

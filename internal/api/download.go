@@ -55,7 +55,7 @@ func (h *DownloadHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FIX #6: Validate every path segment to prevent path traversal.
+	// Validate every path segment to prevent path traversal.
 	// Each segment must be a local filename (no separators, no ..).
 	for _, seg := range []string{accountIDStr, date, filename} {
 		if seg == "" || seg == "." || seg == ".." ||

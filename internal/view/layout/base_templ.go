@@ -50,6 +50,26 @@ func PageHeader(eyebrow, title, subtitle, actionHTML string) string {
 </div>`, eyebrow, title, subtitle, actionHTML)
 }
 
+// Bare wraps inner content in the HTML shell without the navigation bar —
+// used by pages that render before authentication (login / first-run setup).
+func Bare(title string, inner templ.Component) templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		if _, err := io.WriteString(w, head(title)); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, `<main class="relative z-10 mx-auto flex w-full max-w-6xl flex-1 items-center justify-center px-5 py-10 sm:px-8">`); err != nil {
+			return err
+		}
+		if inner != nil {
+			if err := inner.Render(ctx, w); err != nil {
+				return err
+			}
+		}
+		_, err := io.WriteString(w, `</main>`+footer())
+		return err
+	})
+}
+
 func head(title string) string {
 	return `<!doctype html>
 <html lang="en" class="dark">
@@ -58,10 +78,8 @@ func head(title string) string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>` + title + ` · katchup</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🥫</text></svg>">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
+<link href="/static/fonts.css" rel="stylesheet">
+<script src="/static/tailwind.js"></script>
 <script>
 tailwind.config = {
   theme: {
@@ -135,8 +153,11 @@ func nav(active string) string {
 			` + link("/browse", "Browse", "browse") + `
 			` + link("/search", "Search", "search") + `
 		</nav>
-		<div class="ml-auto hidden items-center gap-2 font-mono text-[11px] uppercase tracking-widest text-mute sm:flex">
-			<span class="live-dot h-1.5 w-1.5 rounded-full bg-emerald-400"></span> archiving
+		<div class="ml-auto flex items-center gap-5">
+			<div class="hidden items-center gap-2 font-mono text-[11px] uppercase tracking-widest text-mute sm:flex">
+				<span class="live-dot h-1.5 w-1.5 rounded-full bg-emerald-400"></span> archiving
+			</div>
+			<form method="POST" action="/logout"><button type="submit" class="text-sm font-medium text-mute transition-colors hover:text-white">Lock</button></form>
 		</div>
 	</div>
 </header>`

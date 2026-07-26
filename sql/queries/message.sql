@@ -77,7 +77,7 @@ ORDER BY m.internal_date DESC, m.id DESC
 LIMIT @row_limit;
 
 -- name: GetArchivedByMessageID :one
--- Archived-lookup (Hermes read side): resolve a message by its RFC5322
+-- Archived-lookup (API read side): resolve a message by its RFC5322
 -- Message-ID header across all accounts/folders. Returns the katchup row id,
 -- when it was archived (created_at), and the blob's content hash. Newest match
 -- wins when the same Message-ID exists in multiple folders/accounts.

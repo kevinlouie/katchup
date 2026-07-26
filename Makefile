@@ -9,9 +9,10 @@ run:
 test:
 	go test ./...
 
+# Note: no `templ generate` here — the shipped *_templ.go files are
+# hand-maintained Go and regenerating would break the build.
 generate:
 	sqlc generate
-	templ generate
 
 docker:
 	docker compose build

@@ -33,11 +33,15 @@ type Config struct {
 	Listen      string
 	MasterKey   string
 	Environment string
-	// APIToken guards the Hermes-facing /api/* routes. If empty, every /api/*
+	// APIToken guards the machine-facing /api/* routes. If empty, every /api/*
 	// request fails closed with 503 (never silently open).
 	APIToken string
-	// SyncInterval is the scheduled-sync safety-net floor. Hermes drives
-	// freshness via POST /api/sync; this guarantees a backup even if Hermes is
+	// UIKey is the access key for the web UI. If set, the UI requires it at
+	// /login. If unset, the UI prompts for a key to be created on first visit
+	// and stores its hash in the database.
+	UIKey string
+	// SyncInterval is the scheduled-sync safety-net floor. An external agent can
+	// drive freshness via POST /api/sync; this guarantees a backup even if it is
 	// down. Configurable via KATCHUP_SYNC_INTERVAL (default 6h).
 	SyncInterval time.Duration
 	// CoalesceWindow is how long after a run finishes a new POST /api/sync
@@ -69,6 +73,7 @@ func Load() Config {
 		MasterKey:        os.Getenv("KATCHUP_MASTER_KEY"),
 		Environment:      env,
 		APIToken:         os.Getenv("KATCHUP_API_TOKEN"),
+		UIKey:            os.Getenv("KATCHUP_UI_KEY"),
 		SyncInterval:     getDurationEnv("KATCHUP_SYNC_INTERVAL", 6*time.Hour),
 		CoalesceWindow:   getDurationEnv("KATCHUP_COALESCE_WINDOW", 30*time.Second),
 		MeiliURL:         os.Getenv("MEILI_URL"),

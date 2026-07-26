@@ -10,7 +10,10 @@ services:
       - KATCHUP_LISTEN=:8080
       - KATCHUP_ENV=production
       - KATCHUP_MASTER_KEY=${KATCHUP_MASTER_KEY}
-      # Bearer/query token for the Hermes-facing /api/* routes. If unset, /api/*
+      # Access key for the web UI (/login). Optional: if unset, the UI asks you
+      # to create one on first visit and stores its hash in the database.
+      - KATCHUP_UI_KEY=${KATCHUP_UI_KEY}
+      # Bearer token for the machine-facing /api/* routes. If unset, /api/*
       # fails closed (503). Set it in .env to enable the archived-lookup + sync API.
       - KATCHUP_API_TOKEN=${KATCHUP_API_TOKEN}
       # Header-only search backend. Reachable only on the internal compose network

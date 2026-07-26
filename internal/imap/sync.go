@@ -407,7 +407,7 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 			errors = errors[:maxErrors]
 		}
 
-		// FIX #7: Store per-folder last UID so other folders with
+		// Store per-folder last UID so other folders with
 		// lower UID spaces don't get skipped forever.
 		if folderLastUID > 0 {
 			if err := s.store.accountSt.UpsertFolderSyncState(ctx, acct.ID, folder, folderLastUID); err != nil {
@@ -717,7 +717,7 @@ func (s *Syncer) connectSTARTTLS(addr string, acct account.Account) (*client.Cli
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 
-	// FIX #3: Pass ServerName so TLS validation works.
+	// Pass ServerName so TLS validation works.
 	// Without it, StartTLS(nil) uses an empty ServerName and Go's
 	// crypto/tls rejects it with "either ServerName or InsecureSkipVerify".
 	c, err := client.New(conn)
@@ -871,7 +871,7 @@ func (s *Syncer) writeEML(path string, data []byte) error {
 	}
 
 	// Write to temp file first, then rename (atomic write).
-	// FIX (minor): fsync before close so data hits disk.
+	// fsync before close so data hits disk.
 	tmpFile, err := os.CreateTemp(dir, ".eml.tmp.*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
