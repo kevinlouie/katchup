@@ -201,7 +201,7 @@ func (s *Store) ReindexAll(ctx context.Context) (int, error) {
 			if ctx.Err() != nil {
 				return indexed, ctx.Err()
 			}
-			msgs, err := s.ListMessages(ctx, a.ID, "", page, offset)
+			msgs, err := s.ListMessages(ctx, MessageFilter{AccountID: a.ID}, page, offset)
 			if err != nil {
 				return indexed, fmt.Errorf("list messages: %w", err)
 			}

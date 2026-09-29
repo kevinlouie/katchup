@@ -27,6 +27,9 @@ SELECT COUNT(*) FROM messages
 WHERE account_id = ?1 AND folder = ?2 AND uid = ?3;
 
 -- name: ListMessages :many
+-- internal_date is RFC3339 UTC, so @since (inclusive) / @before (exclusive) are
+-- plain string comparisons; pass 'YYYY-MM-DD' or a full timestamp, '' = unbounded.
+-- Rows with an unknown ('') date never match a bound.
 SELECT
     m.id, m.account_id, m.folder, m.uid, m.blob_id,
     m.message_id_hdr, m.fuzzy_fp, m.from_addr, m.to_addr,
@@ -36,13 +39,17 @@ FROM messages m
 JOIN blobs b ON b.id = m.blob_id
 WHERE (@account_id = 0 OR m.account_id = @account_id)
   AND (@date = '' OR substr(m.internal_date, 1, 10) = @date)
+  AND (@since = '' OR m.internal_date >= @since)
+  AND (@before = '' OR (m.internal_date <> '' AND m.internal_date < @before))
 ORDER BY m.internal_date DESC, m.id DESC
 LIMIT @row_limit OFFSET @row_offset;
 
 -- name: CountMessages :one
 SELECT COUNT(*) FROM messages m
 WHERE (@account_id = 0 OR m.account_id = @account_id)
-  AND (@date = '' OR substr(m.internal_date, 1, 10) = @date);
+  AND (@date = '' OR substr(m.internal_date, 1, 10) = @date)
+  AND (@since = '' OR m.internal_date >= @since)
+  AND (@before = '' OR (m.internal_date <> '' AND m.internal_date < @before));
 
 -- name: CountMessagesByAccount :one
 SELECT COUNT(*) FROM messages WHERE account_id = ?1;
@@ -66,15 +73,18 @@ WHERE account_id = ?1 AND folder = ?2 AND uid = ?3;
 -- name: SearchMessagesLike :many
 -- SQLite LIKE fallback for header-only search when Meilisearch is unconfigured.
 -- Matches subject/from only (headers), never the encrypted body. @q must already
--- be wrapped in % wildcards by the caller.
+-- be wrapped in % wildcards by the caller. @since/@before bound internal_date
+-- as in ListMessages.
 SELECT
     m.id, m.account_id, m.folder, m.from_addr, m.to_addr,
     m.subject, m.internal_date, m.message_id_hdr
 FROM messages m
 WHERE (@account_id = 0 OR m.account_id = @account_id)
   AND (m.subject LIKE @q OR m.from_addr LIKE @q)
+  AND (@since = '' OR m.internal_date >= @since)
+  AND (@before = '' OR (m.internal_date <> '' AND m.internal_date < @before))
 ORDER BY m.internal_date DESC, m.id DESC
-LIMIT @row_limit;
+LIMIT @row_limit OFFSET @row_offset;
 
 -- name: GetArchivedByMessageID :one
 -- Archived-lookup (API read side): resolve a message by its RFC5322

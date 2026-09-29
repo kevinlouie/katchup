@@ -17,6 +17,7 @@ import (
 	"katchup/internal/config"
 	"katchup/internal/crypto"
 	"katchup/internal/imap"
+	"katchup/internal/mcpserver"
 	"katchup/internal/search"
 	"katchup/internal/view/static"
 	migrations "katchup/sql/migrations"
@@ -217,6 +218,17 @@ func main() {
 	// the run id; per-account mutex + coalesce window guard against stampede.
 	syncTriggerHandler := api.NewSyncTriggerHandler(store, syncer, cfg.CoalesceWindow)
 	apiMux.HandleFunc("POST /api/sync", syncTriggerHandler.Trigger)
+	// MCP server (stateless streamable HTTP) for agents: same token, plus
+	// get_message, which returns decrypted bodies.
+	apiMux.Handle("/api/mcp", mcpserver.Handler(mcpserver.Deps{
+		Accounts:       store,
+		Messages:       imapStore,
+		Syncer:         syncer,
+		Searcher:       searcher,
+		DataDir:        dataDir,
+		KeyWrapper:     keyWrapper,
+		CoalesceWindow: cfg.CoalesceWindow,
+	}))
 	mux.Handle("/api/", api.APIAuth(cfg.APIToken, apiMux))
 	if cfg.APIToken == "" {
 		slog.Warn("KATCHUP_API_TOKEN not set — /api/* routes are disabled (503)")

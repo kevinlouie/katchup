@@ -114,6 +114,7 @@ not accepted — URLs end up in logs). If `KATCHUP_API_TOKEN` is unset, every
 | `GET /api/archived?message_id=<id>[&fp=<fuzzy_fp>]` | Is this message archived? Returns `{archived, archived_at, id, sha256}` |
 | `POST /api/archived/lookup` `{message_ids:[…]}` | Batch archived-status lookup |
 | `POST /api/sync?account=<id>` | Trigger a sync. Returns **202** with a run id; runs async, coalesces onto a recent/in-flight run |
+| `POST /api/mcp` | MCP server for agents — see below |
 
 ### Integration pattern
 
@@ -131,6 +132,36 @@ For Gmail, sync **All Mail**: it retains every message regardless of labels, so
 an agent moving/labelling live mail can never hide an unarchived message from
 katchup's index.
 
+### MCP server (`/api/mcp`)
+
+The same archive, as [Model Context Protocol](https://modelcontextprotocol.io)
+tools for LLM agents (open-webui, Claude Code, …). Streamable HTTP, stateless —
+it speaks the `2026-07-28` protocol and accepts 2025 streamable-HTTP clients.
+Same bearer token as the rest of `/api/*`.
+
+| Tool | Description |
+|---|---|
+| `list_accounts` | Mailboxes, folders, message counts, last sync run |
+| `search_messages` | Header search (from/to/subject), with account + date window (`since`/`until`/`newer_than_days`) and `page`/`limit` paging |
+| `list_messages` | Browse newest first with the same filters, when keywords may miss |
+| `get_message` | **Decrypted** headers + text body (HTML flattened, truncated to `max_chars`) + attachment names/sizes |
+| `check_archived` | Batch Message-ID / fingerprint archived check |
+| `sync_status` / `trigger_sync` | Recent runs; start a coalesced sync |
+
+```bash
+claude mcp add --transport http katchup https://katchup.example/api/mcp \
+  --header "Authorization: Bearer $KATCHUP_API_TOKEN"
+```
+
+- Dates are UTC. `until` includes the whole day; `newer_than_days` is measured
+  from now, so the model needn't know today's date.
+- Search results come back in relevance order from Meilisearch and newest-first
+  from the SQLite fallback; each response says which (`backend`, `order`). Page
+  with `page` until `has_more` is false — paging is only stable while the backend
+  stays the same.
+- `check_archived` (and `GET /api/archived`) match a Message-ID with or without
+  angle brackets.
+
 ## Search
 
 `/search` queries Meilisearch and indexes **headers only** — `from`, `to`,
@@ -138,6 +169,10 @@ katchup's index.
 indexed**; they stay in the encrypted blobs. If `MEILI_URL` is unset, search
 degrades gracefully to a SQLite `LIKE` over subject/from with no external
 dependency.
+
+Date-bounded search filters on a numeric `date_ts` field. Messages indexed
+before it existed lack it and drop out of date-bounded Meili searches — run
+`katchup reindex` once after upgrading.
 
 ## Development
 
@@ -165,12 +200,15 @@ sqlc-generated code lives in `internal/database/` — don't hand-edit it.
   visit). The session cookie is `HttpOnly` + `SameSite=Lax`, which also blocks
   cross-site request forgery against the state-changing routes.
 - The `/api/*` surface is token-guarded (Bearer header only) and fails closed.
+  The token also grants **read access to decrypted mail** via the MCP
+  `get_message` tool — treat it like the UI key, and only point LLMs you trust
+  with your mail at it (katchup logs each message it serves).
 - **Set `KATCHUP_MASTER_KEY`, and make it a random value** (e.g.
   `openssl rand -hex 32`). It is stretched with a plain SHA-256, not a
   password KDF — a short human passphrase weakens every blob. Without a master
   key, mail *and* stored IMAP passwords are written in plaintext.
-- Plaintext and content keys never leave the process; content keys are
-  ephemeral per file.
+- Content keys never leave the process and are ephemeral per file. Plaintext
+  leaves only on request: the UI's `.eml` download and MCP `get_message`.
 
 ## License
 

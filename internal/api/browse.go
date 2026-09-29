@@ -1,10 +1,11 @@
 package api
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -77,8 +78,9 @@ func (h *BrowseHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	perPage := 50
+	filter := imap.MessageFilter{AccountID: accountID, Date: dateStr}
 
-	total, err := h.imapStore.CountMessages(ctx, accountID, dateStr)
+	total, err := h.imapStore.CountMessages(ctx, filter)
 	if err != nil {
 		slog.Error("failed to count messages", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -90,7 +92,7 @@ func (h *BrowseHandler) List(w http.ResponseWriter, r *http.Request) {
 		offset = total
 	}
 
-	msgs, err := h.imapStore.ListMessages(ctx, accountID, dateStr, int64(perPage), offset)
+	msgs, err := h.imapStore.ListMessages(ctx, filter, int64(perPage), offset)
 	if err != nil {
 		slog.Error("failed to list messages", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -214,48 +216,18 @@ func (h *BrowseHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// blob.path is trusted (written by the sync path) but still confirm the
-	// resolved file stays under the data dir before reading it.
-	encPath := filepath.Join(h.dataDir, filepath.Clean(msg.BlobPath))
-	absDataDir, err := filepath.Abs(h.dataDir)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	absPath, err := filepath.Abs(encPath)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if !strings.HasPrefix(absPath, absDataDir+string(filepath.Separator)) && absPath != absDataDir {
+	plaintext, err := imap.ReadMessageBlob(h.dataDir, msg.BlobPath, h.keyWrapper)
+	switch {
+	case errors.Is(err, imap.ErrInvalidBlobPath):
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
-	}
-
-	if _, err := os.Stat(encPath); err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "file not found", http.StatusNotFound)
-		} else {
-			http.Error(w, "cannot access file", http.StatusInternalServerError)
-		}
+	case errors.Is(err, fs.ErrNotExist):
+		http.Error(w, "file not found", http.StatusNotFound)
 		return
-	}
-
-	var plaintext []byte
-	if h.keyWrapper != nil {
-		plaintext, err = crypto.DecryptFile(encPath, h.keyWrapper)
-		if err != nil {
-			slog.Error("failed to decrypt file via browse", "path", encPath, "error", err)
-			http.Error(w, "decryption failed", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		plaintext, err = os.ReadFile(encPath)
-		if err != nil {
-			slog.Error("failed to read file via browse", "path", encPath, "error", err)
-			http.Error(w, "cannot read file", http.StatusInternalServerError)
-			return
-		}
+	case err != nil:
+		slog.Error("failed to read message blob via browse", "path", msg.BlobPath, "error", err)
+		http.Error(w, "cannot read message", http.StatusInternalServerError)
+		return
 	}
 
 	sanitized := sanitizeFilename(filepath.Base(msg.BlobPath))

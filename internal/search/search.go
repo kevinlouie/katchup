@@ -7,7 +7,10 @@
 // never a hard dependency.
 package search
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Doc is the header-only search document pushed to the backend on message store.
 // It deliberately has NO body or attachment field — indexing headers only is the
@@ -42,9 +45,29 @@ type Indexer interface {
 	Index(ctx context.Context, doc Doc) error
 }
 
-// Searcher queries the backend. accountID == 0 means "all accounts".
+// Query is one header-only search request.
+type Query struct {
+	Text string
+	// AccountID restricts to one account; 0 means all accounts.
+	AccountID int64
+	// Since (inclusive) and Before (exclusive) bound the message date; the zero
+	// time leaves that side unbounded.
+	Since, Before time.Time
+	Limit, Offset int
+}
+
+// SQLTime renders t in the messages.internal_date format (RFC3339 UTC), so a
+// string comparison orders correctly; the zero time renders as "".
+func SQLTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// Searcher queries the backend.
 type Searcher interface {
-	Search(ctx context.Context, query string, accountID int64, limit int) ([]Result, error)
+	Search(ctx context.Context, q Query) ([]Result, error)
 }
 
 // NoopIndexer is the indexer used when Meilisearch is unconfigured: indexing is a

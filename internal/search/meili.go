@@ -35,8 +35,8 @@ func NewMeili(url, key string) *Meili {
 	}
 }
 
-// EnsureIndex creates the index (primary key "id") and marks account_id/folder as
-// filterable so account-scoped search works. Best-effort: callers log and continue
+// EnsureIndex creates the index (primary key "id") and marks account_id/folder/
+// date_ts as filterable so account- and date-scoped search works. Best-effort: callers log and continue
 // on error, since search degrades to the DB LIKE fallback if Meili is unreachable.
 func (m *Meili) EnsureIndex(ctx context.Context) error {
 	// Create the index (idempotent: an already-existing index returns an error we
@@ -49,7 +49,7 @@ func (m *Meili) EnsureIndex(ctx context.Context) error {
 		}
 	}
 	settings := map[string]any{
-		"filterableAttributes": []string{"account_id", "folder"},
+		"filterableAttributes": []string{"account_id", "folder", "date_ts"},
 		"searchableAttributes": []string{"subject", "from", "to", "message_id"},
 	}
 	if _, err := m.do(ctx, http.MethodPatch, "/indexes/"+indexName+"/settings", settings); err != nil {
@@ -58,10 +58,22 @@ func (m *Meili) EnsureIndex(ctx context.Context) error {
 	return nil
 }
 
+// meiliDoc is the stored document: Doc plus a numeric date_ts, because Meili
+// only range-filters numbers. Docs indexed before date_ts existed lack it and
+// drop out of date-bounded searches until `katchup reindex`.
+type meiliDoc struct {
+	Doc
+	DateTS int64 `json:"date_ts,omitempty"`
+}
+
 // Index upserts a single header-only doc. Meili treats a POST of documents as an
 // upsert keyed on the primary key ("id"), so re-indexing the same message is safe.
 func (m *Meili) Index(ctx context.Context, doc Doc) error {
-	if _, err := m.do(ctx, http.MethodPost, "/indexes/"+indexName+"/documents", []Doc{doc}); err != nil {
+	md := meiliDoc{Doc: doc}
+	if t, err := time.Parse(time.RFC3339, doc.Date); err == nil {
+		md.DateTS = t.Unix()
+	}
+	if _, err := m.do(ctx, http.MethodPost, "/indexes/"+indexName+"/documents", []meiliDoc{md}); err != nil {
 		return fmt.Errorf("index doc %d: %w", doc.ID, err)
 	}
 	return nil
@@ -72,15 +84,28 @@ type meiliSearchResponse struct {
 	Hits []Doc `json:"hits"`
 }
 
-// Search runs a header-only query. accountID > 0 adds a Meili filter. Returns hits
-// mapped to Result. Errors bubble up so the handler can fall back to the DB LIKE.
-func (m *Meili) Search(ctx context.Context, query string, accountID int64, limit int) ([]Result, error) {
+// Search runs a header-only query, ranked by relevance. Account and date bounds
+// become Meili filters. Returns hits mapped to Result. Errors bubble up so the
+// handler can fall back to the DB LIKE. Meili stops paging at its maxTotalHits
+// (default 1000).
+func (m *Meili) Search(ctx context.Context, q Query) ([]Result, error) {
+	limit := q.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	body := map[string]any{"q": query, "limit": limit}
-	if accountID > 0 {
-		body["filter"] = "account_id = " + strconv.FormatInt(accountID, 10)
+	body := map[string]any{"q": q.Text, "limit": limit, "offset": q.Offset}
+	var filters []string
+	if q.AccountID > 0 {
+		filters = append(filters, "account_id = "+strconv.FormatInt(q.AccountID, 10))
+	}
+	if !q.Since.IsZero() {
+		filters = append(filters, "date_ts >= "+strconv.FormatInt(q.Since.Unix(), 10))
+	}
+	if !q.Before.IsZero() {
+		filters = append(filters, "date_ts < "+strconv.FormatInt(q.Before.Unix(), 10))
+	}
+	if len(filters) > 0 {
+		body["filter"] = strings.Join(filters, " AND ")
 	}
 	raw, err := m.do(ctx, http.MethodPost, "/indexes/"+indexName+"/search", body)
 	if err != nil {

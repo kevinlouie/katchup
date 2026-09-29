@@ -157,7 +157,7 @@ type stubSearcher struct {
 	err     error
 }
 
-func (s *stubSearcher) Search(_ context.Context, _ string, _ int64, _ int) ([]search.Result, error) {
+func (s *stubSearcher) Search(_ context.Context, _ search.Query) ([]search.Result, error) {
 	s.called = true
 	return s.results, s.err
 }

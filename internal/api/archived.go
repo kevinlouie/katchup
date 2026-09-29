@@ -93,29 +93,11 @@ func (h *ArchivedHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 // lookup resolves a single message, trying the Message-ID first and falling back
 // to the fuzzy fingerprint when a fp is supplied and the Message-ID missed.
 func (h *ArchivedHandler) lookup(r *http.Request, messageID, fp string) (ArchivedStatus, error) {
-	ctx := r.Context()
-
-	if messageID != "" {
-		a, found, err := h.store.LookupArchivedByMessageID(ctx, messageID)
-		if err != nil {
-			return ArchivedStatus{}, err
-		}
-		if found {
-			return ArchivedStatus{Archived: true, ArchivedAt: a.ArchivedAt, ID: a.ID, Sha256: a.Sha256}, nil
-		}
+	a, found, err := h.store.LookupArchived(r.Context(), messageID, fp)
+	if err != nil || !found {
+		return ArchivedStatus{Archived: false}, err
 	}
-
-	if fp != "" {
-		a, found, err := h.store.LookupArchivedByFuzzyFp(ctx, fp)
-		if err != nil {
-			return ArchivedStatus{}, err
-		}
-		if found {
-			return ArchivedStatus{Archived: true, ArchivedAt: a.ArchivedAt, ID: a.ID, Sha256: a.Sha256}, nil
-		}
-	}
-
-	return ArchivedStatus{Archived: false}, nil
+	return ArchivedStatus{Archived: true, ArchivedAt: a.ArchivedAt, ID: a.ID, Sha256: a.Sha256}, nil
 }
 
 // ServeHTTP dispatches the archived-lookup routes.

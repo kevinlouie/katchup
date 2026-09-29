@@ -14,15 +14,24 @@ const countMessages = `-- name: CountMessages :one
 SELECT COUNT(*) FROM messages m
 WHERE (?1 = 0 OR m.account_id = ?1)
   AND (?2 = '' OR substr(m.internal_date, 1, 10) = ?2)
+  AND (?3 = '' OR m.internal_date >= ?3)
+  AND (?4 = '' OR (m.internal_date <> '' AND m.internal_date < ?4))
 `
 
 type CountMessagesParams struct {
 	AccountID interface{} `json:"account_id"`
 	Date      interface{} `json:"date"`
+	Since     interface{} `json:"since"`
+	Before    interface{} `json:"before"`
 }
 
 func (q *Queries) CountMessages(ctx context.Context, arg CountMessagesParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countMessages, arg.AccountID, arg.Date)
+	row := q.db.QueryRowContext(ctx, countMessages,
+		arg.AccountID,
+		arg.Date,
+		arg.Since,
+		arg.Before,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -257,13 +266,17 @@ FROM messages m
 JOIN blobs b ON b.id = m.blob_id
 WHERE (?1 = 0 OR m.account_id = ?1)
   AND (?2 = '' OR substr(m.internal_date, 1, 10) = ?2)
+  AND (?3 = '' OR m.internal_date >= ?3)
+  AND (?4 = '' OR (m.internal_date <> '' AND m.internal_date < ?4))
 ORDER BY m.internal_date DESC, m.id DESC
-LIMIT ?4 OFFSET ?3
+LIMIT ?6 OFFSET ?5
 `
 
 type ListMessagesParams struct {
 	AccountID interface{} `json:"account_id"`
 	Date      interface{} `json:"date"`
+	Since     interface{} `json:"since"`
+	Before    interface{} `json:"before"`
 	RowOffset int64       `json:"row_offset"`
 	RowLimit  int64       `json:"row_limit"`
 }
@@ -286,10 +299,15 @@ type ListMessagesRow struct {
 	BlobSha256   string         `json:"blob_sha256"`
 }
 
+// internal_date is RFC3339 UTC, so @since (inclusive) / @before (exclusive) are
+// plain string comparisons; pass 'YYYY-MM-DD' or a full timestamp, ” = unbounded.
+// Rows with an unknown (”) date never match a bound.
 func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]ListMessagesRow, error) {
 	rows, err := q.db.QueryContext(ctx, listMessages,
 		arg.AccountID,
 		arg.Date,
+		arg.Since,
+		arg.Before,
 		arg.RowOffset,
 		arg.RowLimit,
 	)
@@ -337,13 +355,18 @@ SELECT
 FROM messages m
 WHERE (?1 = 0 OR m.account_id = ?1)
   AND (m.subject LIKE ?2 OR m.from_addr LIKE ?2)
+  AND (?3 = '' OR m.internal_date >= ?3)
+  AND (?4 = '' OR (m.internal_date <> '' AND m.internal_date < ?4))
 ORDER BY m.internal_date DESC, m.id DESC
-LIMIT ?3
+LIMIT ?6 OFFSET ?5
 `
 
 type SearchMessagesLikeParams struct {
 	AccountID interface{}    `json:"account_id"`
 	Q         sql.NullString `json:"q"`
+	Since     interface{}    `json:"since"`
+	Before    interface{}    `json:"before"`
+	RowOffset int64          `json:"row_offset"`
 	RowLimit  int64          `json:"row_limit"`
 }
 
@@ -360,9 +383,17 @@ type SearchMessagesLikeRow struct {
 
 // SQLite LIKE fallback for header-only search when Meilisearch is unconfigured.
 // Matches subject/from only (headers), never the encrypted body. @q must already
-// be wrapped in % wildcards by the caller.
+// be wrapped in % wildcards by the caller. @since/@before bound internal_date
+// as in ListMessages.
 func (q *Queries) SearchMessagesLike(ctx context.Context, arg SearchMessagesLikeParams) ([]SearchMessagesLikeRow, error) {
-	rows, err := q.db.QueryContext(ctx, searchMessagesLike, arg.AccountID, arg.Q, arg.RowLimit)
+	rows, err := q.db.QueryContext(ctx, searchMessagesLike,
+		arg.AccountID,
+		arg.Q,
+		arg.Since,
+		arg.Before,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

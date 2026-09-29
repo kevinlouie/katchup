@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"katchup/internal/account"
 	"katchup/internal/database"
@@ -194,13 +196,16 @@ func (s *Store) InsertAndIndexMessage(ctx context.Context, p InsertMessageParams
 }
 
 // SearchMessagesLike is the SQLite LIKE fallback for header-only search: it matches
-// the query against subject/from only (never the encrypted body). accountID == 0
-// searches all accounts. Returns results newest-first, capped at limit.
-func (s *Store) SearchMessagesLike(ctx context.Context, accountID int64, query string, limit int) ([]search.Result, error) {
+// q.Text against subject/from only (never the encrypted body), within q's account
+// and date bounds. Returns results newest-first, one page of q.Limit at q.Offset.
+func (s *Store) SearchMessagesLike(ctx context.Context, q search.Query) ([]search.Result, error) {
 	rows, err := s.queries.SearchMessagesLike(ctx, database.SearchMessagesLikeParams{
-		AccountID: accountID,
-		Q:         nullStr("%" + query + "%"),
-		RowLimit:  int64(limit),
+		AccountID: q.AccountID,
+		Q:         nullStr("%" + q.Text + "%"),
+		Since:     search.SQLTime(q.Since),
+		Before:    search.SQLTime(q.Before),
+		RowLimit:  int64(q.Limit),
+		RowOffset: int64(q.Offset),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search messages: %w", err)
@@ -220,12 +225,23 @@ func (s *Store) SearchMessagesLike(ctx context.Context, accountID int64, query s
 	return out, nil
 }
 
-// CountMessages returns the number of messages matching the account (0 = all)
-// and date (empty = all) filters.
-func (s *Store) CountMessages(ctx context.Context, accountID int64, date string) (int64, error) {
+// MessageFilter selects messages for ListMessages/CountMessages. Zero-valued
+// fields don't filter.
+type MessageFilter struct {
+	AccountID int64
+	// Date is one UTC day, "YYYY-MM-DD".
+	Date string
+	// Since (inclusive) and Before (exclusive) bound the internal date.
+	Since, Before time.Time
+}
+
+// CountMessages returns the number of messages matching f.
+func (s *Store) CountMessages(ctx context.Context, f MessageFilter) (int64, error) {
 	return s.queries.CountMessages(ctx, database.CountMessagesParams{
-		AccountID: accountID,
-		Date:      date,
+		AccountID: f.AccountID,
+		Date:      f.Date,
+		Since:     search.SQLTime(f.Since),
+		Before:    search.SQLTime(f.Before),
 	})
 }
 
@@ -234,12 +250,14 @@ func (s *Store) CountMessagesByAccount(ctx context.Context, accountID int64) (in
 	return s.queries.CountMessagesByAccount(ctx, accountID)
 }
 
-// ListMessages returns a page of messages (joined with their blob) matching the
-// account (0 = all) and date (empty = all) filters, newest first.
-func (s *Store) ListMessages(ctx context.Context, accountID int64, date string, limit, offset int64) ([]Message, error) {
+// ListMessages returns a page of messages (joined with their blob) matching f,
+// newest first.
+func (s *Store) ListMessages(ctx context.Context, f MessageFilter, limit, offset int64) ([]Message, error) {
 	rows, err := s.queries.ListMessages(ctx, database.ListMessagesParams{
-		AccountID: accountID,
-		Date:      date,
+		AccountID: f.AccountID,
+		Date:      f.Date,
+		Since:     search.SQLTime(f.Since),
+		Before:    search.SQLTime(f.Before),
 		RowLimit:  limit,
 		RowOffset: offset,
 	})
@@ -326,6 +344,28 @@ func (s *Store) LookupArchivedByFuzzyFp(ctx context.Context, fp string) (Archive
 		return Archived{}, false, fmt.Errorf("lookup archived by fuzzy_fp: %w", err)
 	}
 	return Archived{ID: r.ID, ArchivedAt: r.CreatedAt, Sha256: r.BlobSha256}, true, nil
+}
+
+// LookupArchived resolves a message by its Message-ID header first; if that
+// misses and fp is non-empty, it falls back to the fuzzy fingerprint. The bool
+// reports whether either matched; a miss is not an error.
+//
+// The Message-ID matches with or without angle brackets: IMAP sync stores the
+// envelope value as-is ("<x@y>") while backfill stores it bare ("x@y"), and
+// callers may pass either form.
+func (s *Store) LookupArchived(ctx context.Context, messageID, fp string) (Archived, bool, error) {
+	if bare := strings.TrimSpace(strings.Trim(strings.TrimSpace(messageID), "<>")); bare != "" {
+		for _, id := range []string{"<" + bare + ">", bare} {
+			a, found, err := s.LookupArchivedByMessageID(ctx, id)
+			if err != nil || found {
+				return a, found, err
+			}
+		}
+	}
+	if fp != "" {
+		return s.LookupArchivedByFuzzyFp(ctx, fp)
+	}
+	return Archived{}, false, nil
 }
 
 // nullStr wraps a string as a valid sql.NullString (empty strings are stored as

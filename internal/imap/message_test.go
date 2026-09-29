@@ -179,7 +179,7 @@ func TestDedupBlobRefcount(t *testing.T) {
 	}
 
 	// Two messages rows, one per folder/uid.
-	total, err := store.CountMessages(ctx, accountID, "")
+	total, err := store.CountMessages(ctx, MessageFilter{AccountID: accountID})
 	if err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
@@ -212,5 +212,36 @@ func TestMessageExistsIdempotent(t *testing.T) {
 	missing, err := store.MessageExists(ctx, accountID, "INBOX", 6)
 	if err != nil || missing {
 		t.Fatalf("expected no message, got exists=%v err=%v", missing, err)
+	}
+}
+
+// TestLookupArchivedBracketForms: IMAP sync stores the envelope Message-ID with
+// angle brackets, backfill stores it bare; either query form must find either.
+func TestLookupArchivedBracketForms(t *testing.T) {
+	store, accountID := newTestStore(t)
+	ctx := context.Background()
+
+	for uid, stored := range map[int64]string{1: "<synced@example.com>", 2: "backfilled@example.com"} {
+		blobID, err := store.UpsertBlob(ctx, accountID, stored, stored, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.InsertMessage(ctx, InsertMessageParams{
+			AccountID: accountID, Folder: "INBOX", UID: uid, BlobID: blobID, MessageIDHdr: stored,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, q := range []string{
+		"<synced@example.com>", "synced@example.com", " <synced@example.com> ", "< synced@example.com >",
+		"<backfilled@example.com>", "backfilled@example.com",
+	} {
+		if _, found, err := store.LookupArchived(ctx, q, ""); err != nil || !found {
+			t.Errorf("LookupArchived(%q) found=%v err=%v", q, found, err)
+		}
+	}
+	if _, found, _ := store.LookupArchived(ctx, "<>", ""); found {
+		t.Error(`LookupArchived("<>") matched`)
 	}
 }

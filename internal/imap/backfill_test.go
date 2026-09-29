@@ -67,7 +67,7 @@ func TestBackfillIndexesFromDisk(t *testing.T) {
 	}
 
 	// Header parsing: MIME subject decoded, Message-ID unwrapped, from = bare addr.
-	msgs, err := s.store.ListMessages(ctx, accountID, "", 100, 0)
+	msgs, err := s.store.ListMessages(ctx, MessageFilter{AccountID: accountID}, 100, 0)
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}

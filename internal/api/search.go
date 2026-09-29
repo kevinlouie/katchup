@@ -98,14 +98,15 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 // if Meili is unset or errors. It returns the results and a label naming the
 // backend that served them.
 func (h *SearchHandler) runSearch(ctx context.Context, query string, accountID int64) ([]search.Result, string) {
+	q := search.Query{Text: query, AccountID: accountID, Limit: searchLimit}
 	if h.searcher != nil {
-		results, err := h.searcher.Search(ctx, query, accountID, searchLimit)
+		results, err := h.searcher.Search(ctx, q)
 		if err == nil {
 			return results, "meilisearch"
 		}
 		slog.Warn("meili search failed, falling back to database", "error", err)
 	}
-	results, err := h.imapStore.SearchMessagesLike(ctx, accountID, query, searchLimit)
+	results, err := h.imapStore.SearchMessagesLike(ctx, q)
 	if err != nil {
 		slog.Error("database search failed", "error", err)
 		return nil, "database"
