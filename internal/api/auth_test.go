@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
@@ -100,7 +101,11 @@ func TestUIAuth_HealthAndAPIExempt(t *testing.T) {
 }
 
 func TestUIAuth_EnvKeyLoginFlow(t *testing.T) {
-	h := protectedMux(newTestUIAuth(t, "correct-horse"))
+	a := newTestUIAuth(t, "correct-horse")
+	if a.setupToken != "" {
+		t.Fatal("no setup token should exist when KATCHUP_UI_KEY is set")
+	}
+	h := protectedMux(a)
 
 	// Wrong key: re-rendered login page (200), no session cookie.
 	w := postForm(h, "/login", url.Values{"key": {"wrong"}})
@@ -151,11 +156,32 @@ func TestUIAuth_EnvKeyLoginFlow(t *testing.T) {
 }
 
 func TestUIAuth_FirstRunSetupFlow(t *testing.T) {
-	h := protectedMux(newTestUIAuth(t, ""))
+	a := newTestUIAuth(t, "")
+	h := protectedMux(a)
+	token := a.setupToken
+	if token == "" {
+		t.Fatal("expected a setup token while no key is configured")
+	}
+
+	// Setup without the token from the log is refused — this is what stops
+	// the first visitor (or a cross-site form) from claiming the UI.
+	for _, bad := range []string{"", "not-the-token"} {
+		w := postForm(h, "/login", url.Values{
+			"mode": {"setup"}, "token": {bad}, "key": {"attacker-key-123"}, "confirm": {"attacker-key-123"},
+		})
+		for _, c := range w.Result().Cookies() {
+			if c.Name == sessionCookie && c.Value != "" {
+				t.Fatalf("setup with token %q minted a session", bad)
+			}
+		}
+		if configured, _ := a.keyConfigured(context.Background()); configured {
+			t.Fatalf("setup with token %q stored a key", bad)
+		}
+	}
 
 	// Mismatched confirmation is rejected.
 	w := postForm(h, "/login", url.Values{
-		"mode": {"setup"}, "key": {"hunter2hunter2"}, "confirm": {"different"},
+		"mode": {"setup"}, "token": {token}, "key": {"hunter2hunter2"}, "confirm": {"different"},
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected re-rendered setup page, got %d", w.Code)
@@ -163,7 +189,7 @@ func TestUIAuth_FirstRunSetupFlow(t *testing.T) {
 
 	// Too-short key is rejected.
 	w = postForm(h, "/login", url.Values{
-		"mode": {"setup"}, "key": {"short"}, "confirm": {"short"},
+		"mode": {"setup"}, "token": {token}, "key": {"short"}, "confirm": {"short"},
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected re-rendered setup page for short key, got %d", w.Code)
@@ -171,16 +197,17 @@ func TestUIAuth_FirstRunSetupFlow(t *testing.T) {
 
 	// Valid setup mints a session.
 	w = postForm(h, "/login", url.Values{
-		"mode": {"setup"}, "key": {"hunter2hunter2"}, "confirm": {"hunter2hunter2"},
+		"mode": {"setup"}, "token": {token}, "key": {"hunter2hunter2"}, "confirm": {"hunter2hunter2"},
 	})
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("expected 303 after setup, got %d", w.Code)
 	}
 	sessionFrom(t, w)
 
-	// A second setup attempt is refused (no session cookie).
+	// A second setup attempt is refused (no session cookie), even with the
+	// old token.
 	w = postForm(h, "/login", url.Values{
-		"mode": {"setup"}, "key": {"attacker-key-123"}, "confirm": {"attacker-key-123"},
+		"mode": {"setup"}, "token": {token}, "key": {"attacker-key-123"}, "confirm": {"attacker-key-123"},
 	})
 	for _, c := range w.Result().Cookies() {
 		if c.Name == sessionCookie && c.Value != "" {

@@ -65,7 +65,7 @@ cat > .env <<EOF
 KATCHUP_MASTER_KEY=$(openssl rand -hex 32)   # encrypts all mail — see warning below
 MEILI_MASTER_KEY=$(openssl rand -hex 32)     # required if you run search
 KATCHUP_API_TOKEN=$(openssl rand -hex 32)    # enables the /api/* automation surface
-KATCHUP_UI_KEY=$(openssl rand -hex 16)       # web-UI access key (or set one on first visit)
+KATCHUP_UI_KEY=$(openssl rand -hex 16)       # web-UI access key (or create one on first visit)
 EOF
 
 # 2. Bring it up (katchup + meilisearch).
@@ -75,6 +75,11 @@ docker compose up -d
 # 3. Add a mailbox in the web UI, then let it sync.
 open http://localhost:8080
 ```
+
+If you left `KATCHUP_UI_KEY` unset, the first visit asks you to create an
+access key. To prove you run the server, it also asks for a one-time setup
+token that katchup prints to its log at startup:
+`docker compose logs katchup | grep setup_token`.
 
 The archive (database + encrypted blobs) lives in the `katchup_data` named
 volume, which Docker creates owned by the container's non-root user. To keep
@@ -100,7 +105,7 @@ All configuration is environment variables — no config files.
 | `KATCHUP_LISTEN` | `:8080` | HTTP listen address |
 | `KATCHUP_ENV` | `development` | `production` enables JSON structured logging |
 | `KATCHUP_MASTER_KEY` | — | **Required for encryption.** Wraps per-file content keys. ⚠️ Unset ⇒ mail **and IMAP passwords** are stored in plaintext |
-| `KATCHUP_UI_KEY` | — | Web-UI access key. Unset ⇒ the UI asks you to create one on first visit (hash stored in the DB) |
+| `KATCHUP_UI_KEY` | — | Web-UI access key. Unset ⇒ the UI asks you to create one on first visit, gated by a one-time setup token from the log (hash stored in the DB) |
 | `KATCHUP_API_TOKEN` | — | Bearer token for `/api/*`. **Unset ⇒ `/api/*` returns 503** (fail closed) |
 | `KATCHUP_SYNC_INTERVAL` | `6h` | Scheduled-sync safety-net floor |
 | `KATCHUP_COALESCE_WINDOW` | `30s` | Ignore a trigger this soon after a run finished |
@@ -217,7 +222,9 @@ sqlc-generated code lives in `internal/database/` — don't hand-edit it.
 - Designed for a **trusted LAN** (e.g. behind Tailscale). Even so, do **not**
   port-forward it to the internet.
 - The web UI requires an access key (`KATCHUP_UI_KEY`, or created on first
-  visit). The session cookie is `HttpOnly` + `SameSite=Lax`, which also blocks
+  visit with the setup token from the server log — so the first visitor to
+  the port can't claim it, and losing the database doesn't reopen setup to
+  anyone without log access). The session cookie is `HttpOnly` + `SameSite=Lax`, which also blocks
   cross-site request forgery against the state-changing routes.
 - Login is rate-limited: 5 wrong keys within 15 minutes lock that client
   address out for 15 minutes. The limit keys on the TCP peer address, so behind

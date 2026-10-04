@@ -41,7 +41,7 @@ func LoginPage(data PageData) templ.Component {
 		b.WriteString(`<div class="rounded-2xl border border-white/10 bg-ink-900/60 p-6 shadow-2xl shadow-black/40">`)
 		if data.Setup {
 			b.WriteString(`<h1 class="font-display text-lg font-semibold text-white">Create an access key</h1>
-			<p class="mt-1.5 text-sm text-mute">No access key is configured. Choose one now — it will be required to open this UI. (You can also set <span class="font-mono text-[12px]">KATCHUP_UI_KEY</span> in the environment instead.)</p>`)
+			<p class="mt-1.5 text-sm text-mute">No access key is configured. Choose one now — it will be required to open this UI. To prove you run this server, enter the one-time setup token printed in its log (<span class="font-mono text-[12px]">docker compose logs katchup | grep setup_token</span>). (You can also set <span class="font-mono text-[12px]">KATCHUP_UI_KEY</span> in the environment instead.)</p>`)
 		} else {
 			b.WriteString(`<h1 class="font-display text-lg font-semibold text-white">Unlock</h1>
 			<p class="mt-1.5 text-sm text-mute">Enter the access key for this archive.</p>`)
@@ -55,13 +55,17 @@ func LoginPage(data PageData) templ.Component {
 		if data.Setup {
 			b.WriteString(`<input type="hidden" name="mode" value="setup">`)
 			fmt.Fprintf(&b, `<div>
+				<label class="mb-1.5 block font-mono text-[11px] uppercase tracking-widest text-mute">Setup token (from the server log)</label>
+				<input type="text" name="token" required autofocus autocomplete="off" spellcheck="false" class="%s font-mono">
+			</div>
+			<div>
 				<label class="mb-1.5 block font-mono text-[11px] uppercase tracking-widest text-mute">Access key</label>
-				<input type="password" name="key" required minlength="8" autofocus autocomplete="new-password" class="%s">
+				<input type="password" name="key" required minlength="8" autocomplete="new-password" class="%s">
 			</div>
 			<div>
 				<label class="mb-1.5 block font-mono text-[11px] uppercase tracking-widest text-mute">Confirm key</label>
 				<input type="password" name="confirm" required minlength="8" autocomplete="new-password" class="%s">
-			</div>`, inputCls, inputCls)
+			</div>`, inputCls, inputCls, inputCls)
 			b.WriteString(`<button type="submit" class="w-full rounded-xl bg-ketchup px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-ketchup-600">Create key &amp; unlock</button>`)
 		} else {
 			fmt.Fprintf(&b, `<div>

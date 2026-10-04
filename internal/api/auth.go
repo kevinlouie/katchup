@@ -33,7 +33,10 @@ const (
 
 // UIAuth guards the web UI behind an access key. The key comes from
 // KATCHUP_UI_KEY when set; otherwise the first visit shows a setup page and the
-// key's PBKDF2 hash is stored in app_settings. Sessions are random tokens held
+// key's PBKDF2 hash is stored in app_settings. Setup requires a one-time token
+// printed to the server log at startup, so whoever reaches the port first
+// can't claim the UI (nor can a cross-site form post), and losing the DB
+// doesn't reopen setup to anyone without log access. Sessions are random tokens held
 // in memory (a restart logs everyone out) and carried in an HttpOnly,
 // SameSite=Lax cookie — which also stops cross-site request forgery against the
 // state-changing POST routes, since cross-site POSTs never carry the cookie.
@@ -46,18 +49,43 @@ type UIAuth struct {
 	limiter *loginLimiter
 	hashSem chan struct{}
 
-	mu       sync.Mutex
-	sessions map[string]time.Time // token → expiry
+	mu         sync.Mutex
+	sessions   map[string]time.Time // token → expiry
+	setupToken string               // while no key is configured; see setupTokenFor
 }
 
 func NewUIAuth(db *sql.DB, envKey string) *UIAuth {
-	return &UIAuth{
+	a := &UIAuth{
 		db:       db,
 		envKey:   envKey,
 		limiter:  newLoginLimiter(),
 		hashSem:  make(chan struct{}, maxConcurrentHashes),
 		sessions: make(map[string]time.Time),
 	}
+	// Print the setup token at startup so it is in the log before anyone
+	// visits.
+	if configured, err := a.keyConfigured(context.Background()); err == nil && !configured {
+		a.setupTokenFor()
+	}
+	return a
+}
+
+// setupTokenFor returns the one-time first-run setup token, generating and
+// logging it on first use. It lives only in memory: a restart prints a new one.
+func (a *UIAuth) setupTokenFor() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.setupToken == "" {
+		buf := make([]byte, 12)
+		if _, err := rand.Read(buf); err != nil {
+			slog.Error("ui auth: setup token generation failed", "error", err)
+			return ""
+		}
+		a.setupToken = hex.EncodeToString(buf)
+		slog.Warn("ui auth: no access key configured — open /login and enter this setup token to create one",
+			"setup_token", a.setupToken)
+	}
+	return a.setupToken
 }
 
 // RegisterRoutes adds the login/logout endpoints to the mux. The middleware
@@ -153,6 +181,15 @@ func (a *UIAuth) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	want := a.setupTokenFor()
+	if want == "" || subtle.ConstantTimeCompare([]byte(want), []byte(strings.TrimSpace(r.FormValue("token")))) != 1 {
+		a.limiter.fail(clientIP(r))
+		time.Sleep(loginFailDelay)
+		slog.Warn("ui auth: setup attempt with a wrong setup token", "remote", r.RemoteAddr)
+		a.renderLogin(w, r, "Wrong setup token — it is printed in the server log.")
+		return
+	}
+
 	key := r.FormValue("key")
 	if len(key) < minUIKeyLen {
 		a.renderLogin(w, r, fmt.Sprintf("Access key must be at least %d characters.", minUIKeyLen))
@@ -179,6 +216,9 @@ func (a *UIAuth) setup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("ui auth: access key created via first-run setup")
+	a.mu.Lock()
+	a.setupToken = ""
+	a.mu.Unlock()
 	a.issueSession(w)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
