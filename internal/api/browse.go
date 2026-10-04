@@ -244,3 +244,13 @@ func (h *BrowseHandler) Download(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("served email via browse", "message_id", msg.ID, "account_id", msg.AccountID, "folder", msg.Folder)
 }
+
+func sanitizeFilename(name string) string {
+	name = strings.ReplaceAll(name, "..", "")
+	name = strings.ReplaceAll(name, "/", "")
+	name = strings.ReplaceAll(name, "\\", "")
+	if len(name) > 200 {
+		name = name[:200]
+	}
+	return name
+}

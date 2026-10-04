@@ -5,51 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"katchup/internal/account"
 )
-
-func TestDownloadHandler_PathTraversal(t *testing.T) {
-	dataDir := t.TempDir()
-
-	// Create a file outside the data dir to try to access
-	outsideDir := t.TempDir()
-	outsideFile := filepath.Join(outsideDir, "secret.txt")
-	os.WriteFile(outsideFile, []byte("SECRET"), 0600)
-
-	handler := &DownloadHandler{
-		dataDir: dataDir,
-	}
-
-	tests := []struct {
-		name     string
-		path     string
-		wantCode int
-	}{
-		{"valid path", "/download/1/2024-01-01/2024-01-01_1.eml", http.StatusNotFound},
-		{"dotdot in filename", "/download/1/2024-01-01/../../../etc/passwd", http.StatusBadRequest},
-		{"dotdot in date", "/download/1/../../etc/2024-01-01_1.eml", http.StatusBadRequest},
-		{"dotdot in account", "/download/../etc/2024-01-01/2024-01-01_1.eml", http.StatusBadRequest},
-		{"empty segment", "/download/1//2024-01-01_1.eml", http.StatusBadRequest},
-		{"backslash traversal", "/download/1/2024-01-01/..\\..\\etc\\passwd", http.StatusBadRequest},
-		{"absolute path", "/download/1/etc/passwd", http.StatusNotFound},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tt.path, nil)
-			w := httptest.NewRecorder()
-			handler.Handle(w, req)
-
-			if w.Code != tt.wantCode {
-				t.Errorf("path %q: got status %d, want %d (body: %s)", tt.path, w.Code, tt.wantCode, w.Body.String())
-			}
-		})
-	}
-}
 
 func TestBrowseHandler_Download_InvalidID(t *testing.T) {
 	// Browse download now resolves messages by numeric id (blob.path lookup).

@@ -226,10 +226,6 @@ func main() {
 	searchHandler := api.NewSearchHandler(store, imapStore, searcher)
 	mux.Handle("/search", searchHandler)
 
-	// Register download endpoints
-	dlHandler := api.NewDownloadHandler(store, imapStore, syncer, dataDir, keyWrapper)
-	mux.HandleFunc("GET /download/{accountID}/{date}/{filename}", dlHandler.Handle)
-
 	// Register machine-facing API (/api/*). Wrapped in token auth that fails
 	// closed: if KATCHUP_API_TOKEN is unset, every /api/* route returns 503.
 	apiMux := http.NewServeMux()
