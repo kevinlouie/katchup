@@ -51,6 +51,11 @@ notices, keeps everything already archived, and re-scans that folder from the
 start — re-downloading it, but storing only content it doesn't already have.
 Files written before UIDVALIDITY tracking are named `<YYYY-MM-DD>_<uid>.eml.enc`.
 
+A message that keeps failing to archive for a reason of its own (e.g. the
+server returns an empty body) is retried on the next 3 syncs, then skipped so
+it can't stall the folder. Skipped messages are logged and listed in the
+`failed_uids` table; delete a row to have it retried.
+
 ## Quick start (Docker)
 
 ```bash

@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +43,9 @@ const (
 	fetchBuffer = 4
 	// sizeFetchChunk is how many UIDs one RFC822.SIZE fetch asks about.
 	sizeFetchChunk = 5000
+	// maxUIDAttempts is how many runs may fail on the same message (for a
+	// reason of its own, see errBadMessage) before it is skipped for good.
+	maxUIDAttempts = 3
 	// maxRunDuration caps one sync run. Progress is persisted per batch, so a
 	// run cut off here resumes from its watermark on the next sync.
 	maxRunDuration = 6 * time.Hour
@@ -51,6 +56,11 @@ const (
 	maxErrorsLen   = 1000
 	staleRunAge    = 30 * time.Minute
 )
+
+// errBadMessage marks a failure caused by the message itself (e.g. the server
+// returns an empty body) rather than by katchup's disk or database. Only these
+// count toward maxUIDAttempts: a full disk must not get mail skipped.
+var errBadMessage = errors.New("bad message")
 
 type Syncer struct {
 	store      *Store
@@ -538,9 +548,44 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 		s.logger.Info("no messages to sync", "folder", folder, "account_id", acct.ID)
 		return 0, 0, nil
 	}
+	// The watermark logic below needs ascending UIDs; SEARCH doesn't promise it.
+	slices.Sort(uids)
+	highest := int64(uids[len(uids)-1])
 
-	total := len(uids)
-	s.logger.Info("found messages to sync", "folder", folder, "account_id", acct.ID, "count", total)
+	// Skip, before downloading any body, messages already archived (e.g. above
+	// a watermark pinned by an earlier failure) and messages that have failed
+	// maxUIDAttempts times — the latter count as resolved so they can no
+	// longer hold the watermark back.
+	indexed, err := s.store.IndexedUIDs(ctx, acct.ID, folder, uidValidity, lastSyncUID)
+	if err != nil {
+		errs = append(errs, fmt.Sprintf("folder %s: %v", folder, err))
+		return 0, 0, errs
+	}
+	failed, err := s.store.FailedUIDs(ctx, acct.ID, folder, uidValidity)
+	if err != nil {
+		errs = append(errs, fmt.Sprintf("folder %s: %v", folder, err))
+		return 0, 0, errs
+	}
+	var toFetch []uint32
+	var gaveUp int
+	for _, uid := range uids {
+		switch {
+		case indexed[uid]:
+		case failed[uid] >= maxUIDAttempts:
+			gaveUp++
+		default:
+			toFetch = append(toFetch, uid)
+		}
+	}
+	if gaveUp > 0 {
+		s.logger.Warn("skipping messages that repeatedly failed to archive (see failed_uids)",
+			"folder", folder, "account_id", acct.ID, "count", gaveUp)
+	}
+	if len(toFetch) == 0 {
+		return highest, 0, nil
+	}
+	s.logger.Info("found messages to sync", "folder", folder, "account_id", acct.ID,
+		"count", len(toFetch), "already_archived", len(indexed), "skipped", gaveUp)
 
 	// go-imap v1.2.1's UidFetch has no context and parses each message fully
 	// into memory. Fetching a whole large mailbox in one call cannot finish
@@ -555,23 +600,55 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	bodySection := &imap.BodySectionName{Peek: true}
 	fetchItems := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, bodySection.FetchItem()}
 
-	sizes, err := fetchSizes(c, uids)
+	sizes, err := fetchSizes(c, toFetch)
 	if err != nil {
 		// Not fatal: batches fall back to the count cap alone.
 		s.logger.Warn("failed to fetch message sizes; batching by count only", "folder", folder, "error", err)
 	}
-	batches := planBatches(uids, sizes, fetchBatchSize, fetchBatchBytes)
+	batches := planBatches(toFetch, sizes, fetchBatchSize, fetchBatchBytes)
 
-	// The watermark must only advance over UIDs that were written
-	// successfully: track the highest success and the lowest failure.
-	// safeWatermark is the highest watermark from a fully-drained batch — on
-	// an aborted batch we return that rather than maxSuccess, so UIDs that
-	// were never fetched are retried next run instead of being skipped.
-	var maxSuccess, minFailed, safeWatermark int64
+	// failMessage records a failed attempt at uid. A failure caused by the
+	// message itself (errBadMessage) counts toward maxUIDAttempts; once there,
+	// the message is given up on and no longer holds the watermark back.
+	// Anything else (disk, DB) is retried indefinitely. Returns whether uid
+	// must hold the watermark back.
+	failMessage := func(uid uint32, err error) bool {
+		errMsg := fmt.Sprintf("folder %s: UID %d: %v", folder, uid, err)
+		s.logger.Error(errMsg)
+		errs = appendErr(errs, errMsg)
+		if !errors.Is(err, errBadMessage) {
+			return true
+		}
+		n, rerr := s.store.RecordFailedUID(ctx, acct.ID, folder, uidValidity, int64(uid), err.Error())
+		if rerr != nil {
+			s.logger.Warn("failed to record failed UID", "folder", folder, "uid", uid, "error", rerr)
+			return true
+		}
+		if n < maxUIDAttempts {
+			return true
+		}
+		s.logger.Error("giving up on message after repeated failures; it will be skipped from now on",
+			"folder", folder, "account_id", acct.ID, "uid", uid, "attempts", n)
+		errs = appendErr(errs, fmt.Sprintf("folder %s: UID %d: skipped after %d failed attempts", folder, uid, n))
+		return false
+	}
 
-	for _, batch := range batches {
+	// The watermark must only advance over UIDs that are resolved — archived,
+	// already archived, or given up on. After each fully-drained batch every
+	// UID up to just below the next batch is resolved except the failures, so
+	// the safe watermark is that bound capped below the lowest failure. On an
+	// aborted batch we return the previous safe watermark, so UIDs that were
+	// never fetched are retried next run instead of being skipped.
+	var minFailed, safeWatermark int64
+	holdBack := func(uid uint32) {
+		if minFailed == 0 || int64(uid) < minFailed {
+			minFailed = int64(uid)
+		}
+	}
+
+	for i, batch := range batches {
 		if ctx.Err() != nil {
-			errs = appendErr(errs, fmt.Sprintf("folder %s: cancelled after %d/%d", folder, count, total))
+			errs = appendErr(errs, fmt.Sprintf("folder %s: cancelled after %d/%d", folder, count, len(toFetch)))
 			return safeWatermark, count, errs
 		}
 
@@ -593,7 +670,8 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 		// message, with extra allowance for the largest one in the batch.
 		idle := idleTimeout(batch, sizes)
 		timer := time.NewTimer(idle)
-		aborted := ""
+		delivered := make(map[uint32]bool, len(batch))
+		aborted, stalled := "", false
 	drain:
 		for {
 			select {
@@ -602,24 +680,25 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 					break drain
 				}
 				timer.Reset(idle)
+				delivered[msg.Uid] = true
 				if err := s.fetchAndWriteMessage(ctx, acct, folder, uidValidity, msg.Uid, msg); err != nil {
-					errMsg := fmt.Sprintf("folder %s: UID %d: %v", folder, msg.Uid, err)
-					s.logger.Error(errMsg)
-					errs = appendErr(errs, errMsg)
-					if minFailed == 0 || int64(msg.Uid) < minFailed {
-						minFailed = int64(msg.Uid)
+					if failMessage(msg.Uid, err) {
+						holdBack(msg.Uid)
 					}
 					continue
 				}
 				count++
-				if int64(msg.Uid) > maxSuccess {
-					maxSuccess = int64(msg.Uid)
+				if failed[msg.Uid] > 0 {
+					if err := s.store.ClearFailedUID(ctx, acct.ID, folder, uidValidity, int64(msg.Uid)); err != nil {
+						s.logger.Warn("failed to clear failed UID", "folder", folder, "uid", msg.Uid, "error", err)
+					}
 				}
 			case <-timer.C:
-				aborted = fmt.Sprintf("folder %s: fetch stalled for %v at %d/%d", folder, idle, count, total)
+				aborted = fmt.Sprintf("folder %s: fetch stalled for %v at %d/%d", folder, idle, count, len(toFetch))
+				stalled = true
 				break drain
 			case <-ctx.Done():
-				aborted = fmt.Sprintf("folder %s: cancelled at %d/%d", folder, count, total)
+				aborted = fmt.Sprintf("folder %s: cancelled at %d/%d", folder, count, len(toFetch))
 				break drain
 			}
 		}
@@ -636,6 +715,18 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 			}()
 			<-fetchDone
 			errs = appendErr(errs, aborted)
+			// A stall happens while a message is in flight — most likely the
+			// first one not yet delivered. Count it, so a message the server
+			// can never deliver in time is eventually skipped, not retried
+			// (re-downloading everything before it) on every run.
+			if stalled {
+				for _, uid := range batch {
+					if !delivered[uid] {
+						failMessage(uid, fmt.Errorf("%w: fetch stalled while downloading it", errBadMessage))
+						break
+					}
+				}
+			}
 			return safeWatermark, count, errs
 		}
 
@@ -645,10 +736,21 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 			errs = appendErr(errs, fmt.Sprintf("folder %s: fetch UIDs %d-%d: %v", folder, batch[0], batch[len(batch)-1], err))
 			return safeWatermark, count, errs
 		}
+		// A UID the server didn't return (e.g. expunged since the search, or a
+		// message it can't render) is a failure like any other.
+		for _, uid := range batch {
+			if !delivered[uid] && failMessage(uid, fmt.Errorf("%w: not returned by the server", errBadMessage)) {
+				holdBack(uid)
+			}
+		}
 
 		// Batch fully drained — persist progress so a later interruption
 		// resumes here and the dashboard reflects the running total.
-		safeWatermark = watermark(maxSuccess, minFailed)
+		resolved := highest
+		if i+1 < len(batches) {
+			resolved = int64(batches[i+1][0]) - 1
+		}
+		safeWatermark = watermark(resolved, minFailed)
 		if safeWatermark > 0 {
 			if err := s.store.accountSt.UpsertFolderSyncState(ctx, acct.ID, folder, safeWatermark); err != nil {
 				s.logger.Warn("failed to persist folder sync state", "folder", folder, "error", err)
@@ -659,7 +761,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 				s.logger.Warn("failed to record sync progress", "sync_run_id", syncRunID, "error", err)
 			}
 		}
-		s.logger.Info("sync progress", "folder", folder, "account_id", acct.ID, "done", count, "total", total)
+		s.logger.Info("sync progress", "folder", folder, "account_id", acct.ID, "done", count, "total", len(toFetch))
 
 		// Optional pacing between batches to be gentler on provider rate limits.
 		if s.FetchPacing > 0 {
@@ -671,7 +773,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 		}
 	}
 
-	return watermark(maxSuccess, minFailed), count, errs
+	return safeWatermark, count, errs
 }
 
 // fetchSizes returns the RFC822.SIZE of each of uids, so batches can be planned
@@ -760,6 +862,9 @@ func (s *Syncer) reconcileUIDValidity(ctx context.Context, accountID int64, fold
 		if err := s.store.accountSt.SetFolderSyncState(ctx, accountID, folder, uidValidity, 0); err != nil {
 			return 0, err
 		}
+		if err := s.store.ClearStaleFailedUIDs(ctx, accountID, folder, uidValidity); err != nil {
+			s.logger.Warn("failed to clear stale failed UIDs", "folder", folder, "error", err)
+		}
 		return 0, nil
 	}
 }
@@ -773,7 +878,8 @@ func appendErr(errs []string, msg string) []string {
 	return append(errs, msg)
 }
 
-// watermark returns the highest UID below which every message succeeded.
+// watermark returns the highest UID below which every message succeeded (or
+// is otherwise resolved).
 func watermark(maxSuccess, minFailed int64) int64 {
 	if minFailed > 0 && minFailed-1 < maxSuccess {
 		return minFailed - 1
@@ -900,13 +1006,13 @@ func (s *Syncer) fetchAndWriteMessage(ctx context.Context, acct account.Account,
 	for _, section := range msg.Body {
 		data, err := io.ReadAll(section)
 		if err != nil {
-			return fmt.Errorf("read body: %w", err)
+			return fmt.Errorf("%w: read body: %v", errBadMessage, err)
 		}
 		rawBody = data
 	}
 
 	if len(rawBody) == 0 {
-		return fmt.Errorf("empty message body for UID %d", uid)
+		return fmt.Errorf("%w: empty body", errBadMessage)
 	}
 
 	// Content hash over the raw RFC822 bytes is the per-account dedup key.

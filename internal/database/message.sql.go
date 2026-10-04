@@ -290,6 +290,48 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 	return err
 }
 
+const listIndexedUIDs = `-- name: ListIndexedUIDs :many
+SELECT uid FROM messages
+WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid > ?4
+`
+
+type ListIndexedUIDsParams struct {
+	AccountID   int64  `json:"account_id"`
+	Folder      string `json:"folder"`
+	Uidvalidity int64  `json:"uidvalidity"`
+	Uid         int64  `json:"uid"`
+}
+
+// UIDs already archived in a folder generation above a watermark, so the sync
+// can skip them before downloading any body.
+func (q *Queries) ListIndexedUIDs(ctx context.Context, arg ListIndexedUIDsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listIndexedUIDs,
+		arg.AccountID,
+		arg.Folder,
+		arg.Uidvalidity,
+		arg.Uid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		items = append(items, uid)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMessages = `-- name: ListMessages :many
 SELECT
     m.id, m.account_id, m.folder, m.uid, m.blob_id,

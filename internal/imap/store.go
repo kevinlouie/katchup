@@ -438,3 +438,76 @@ func (s *Store) GetCurrentSyncRun(ctx context.Context, accountID int64) (*accoun
 
 	return nil, nil
 }
+
+// IndexedUIDs returns the UIDs above afterUID already archived for a folder
+// generation, so the sync can skip them without downloading their bodies.
+func (s *Store) IndexedUIDs(ctx context.Context, accountID int64, folder string, uidValidity, afterUID int64) (map[uint32]bool, error) {
+	rows, err := s.queries.ListIndexedUIDs(ctx, database.ListIndexedUIDsParams{
+		AccountID:   accountID,
+		Folder:      folder,
+		Uidvalidity: uidValidity,
+		Uid:         afterUID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list indexed uids: %w", err)
+	}
+	out := make(map[uint32]bool, len(rows))
+	for _, uid := range rows {
+		out[uint32(uid)] = true
+	}
+	return out, nil
+}
+
+// FailedUIDs returns the failed-attempt count of each UID in a folder
+// generation that has failed to archive.
+func (s *Store) FailedUIDs(ctx context.Context, accountID int64, folder string, uidValidity int64) (map[uint32]int64, error) {
+	rows, err := s.queries.ListFailedUIDs(ctx, database.ListFailedUIDsParams{
+		AccountID:   accountID,
+		Folder:      folder,
+		Uidvalidity: uidValidity,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list failed uids: %w", err)
+	}
+	out := make(map[uint32]int64, len(rows))
+	for _, r := range rows {
+		out[uint32(r.Uid)] = r.Attempts
+	}
+	return out, nil
+}
+
+// RecordFailedUID counts one more failed attempt for a message and returns
+// the total so far.
+func (s *Store) RecordFailedUID(ctx context.Context, accountID int64, folder string, uidValidity, uid int64, errMsg string) (int64, error) {
+	n, err := s.queries.RecordFailedUID(ctx, database.RecordFailedUIDParams{
+		AccountID:   accountID,
+		Folder:      folder,
+		Uidvalidity: uidValidity,
+		Uid:         uid,
+		LastError:   errMsg,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("record failed uid: %w", err)
+	}
+	return n, nil
+}
+
+// ClearFailedUID forgets a message's failures once it has been archived.
+func (s *Store) ClearFailedUID(ctx context.Context, accountID int64, folder string, uidValidity, uid int64) error {
+	return s.queries.ClearFailedUID(ctx, database.ClearFailedUIDParams{
+		AccountID:   accountID,
+		Folder:      folder,
+		Uidvalidity: uidValidity,
+		Uid:         uid,
+	})
+}
+
+// ClearStaleFailedUIDs drops a folder's failure records from UIDVALIDITY
+// generations other than the current one.
+func (s *Store) ClearStaleFailedUIDs(ctx context.Context, accountID int64, folder string, uidValidity int64) error {
+	return s.queries.ClearStaleFailedUIDs(ctx, database.ClearStaleFailedUIDsParams{
+		AccountID:   accountID,
+		Folder:      folder,
+		Uidvalidity: uidValidity,
+	})
+}

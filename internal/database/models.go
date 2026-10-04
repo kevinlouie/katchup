@@ -46,6 +46,16 @@ type Blob struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type FailedUid struct {
+	AccountID   int64  `json:"account_id"`
+	Folder      string `json:"folder"`
+	Uidvalidity int64  `json:"uidvalidity"`
+	Uid         int64  `json:"uid"`
+	Attempts    int64  `json:"attempts"`
+	LastError   string `json:"last_error"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
 type FolderSyncState struct {
 	AccountID   int64  `json:"account_id"`
 	Folder      string `json:"folder"`

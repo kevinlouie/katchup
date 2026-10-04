@@ -115,3 +115,9 @@ JOIN blobs b ON b.id = m.blob_id
 WHERE m.fuzzy_fp = ?1
 ORDER BY m.id DESC
 LIMIT 1;
+
+-- name: ListIndexedUIDs :many
+-- UIDs already archived in a folder generation above a watermark, so the sync
+-- can skip them before downloading any body.
+SELECT uid FROM messages
+WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid > ?4;
