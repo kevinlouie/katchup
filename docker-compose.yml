@@ -33,6 +33,8 @@ services:
       meilisearch:
         condition: service_healthy
     restart: unless-stopped
+    # Shutdown waits up to 30s for in-flight syncs to record their progress.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s

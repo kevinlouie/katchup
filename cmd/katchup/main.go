@@ -163,6 +163,13 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Remove temp files left by writes a crash or kill interrupted.
+	if n, err := syncer.SweepTempFiles(); err != nil {
+		slog.Warn("failed to sweep temp files", "error", err)
+	} else if n > 0 {
+		slog.Info("removed temp files from interrupted writes", "count", n)
+	}
+
 	// On startup, mark any stale "running" sync runs as "failed"
 	// so accounts aren't permanently blocked from syncing.
 	if err := syncer.MarkAllStaleRuns(ctx); err != nil {
@@ -173,7 +180,9 @@ func main() {
 	// agent drives freshness via POST /api/sync, but the floor guarantees a backup
 	// even if it is down. Interval is configurable via KATCHUP_SYNC_INTERVAL (6h).
 	syncCtx, syncCancel := context.WithCancel(ctx)
+	schedDone := make(chan struct{})
 	go func() {
+		defer close(schedDone)
 		// Run immediately on startup
 		slog.Info("running initial sync")
 		syncer.SyncAll(syncCtx)
@@ -286,12 +295,23 @@ func main() {
 	<-sig
 
 	slog.Info("shutting down server...")
-	syncCancel()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("server shutdown error", "error", err)
+	}
+
+	// Cancel in-flight syncs and give them time to record where they got to
+	// (watermarks are persisted per batch) before the DB is closed.
+	syncCancel()
+	if err := syncer.Stop(shutdownCtx); err != nil {
+		slog.Warn("triggered sync still running at shutdown", "error", err)
+	}
+	select {
+	case <-schedDone:
+	case <-shutdownCtx.Done():
+		slog.Warn("scheduled sync still running at shutdown")
 	}
 
 	slog.Info("katchup stopped")

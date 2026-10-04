@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -84,6 +85,12 @@ type Syncer struct {
 	// dial opens a logged-in IMAP connection (default connectIMAP); a field so
 	// tests can point the real sync path at an in-process server.
 	dial func(acct account.Account) (*client.Client, error)
+
+	// bgCtx parents syncs started by TriggerSync (which outlive their HTTP
+	// request); Stop cancels it and waits for them via bg.
+	bgCtx  context.Context
+	stopBg context.CancelFunc
+	bg     sync.WaitGroup
 }
 
 func NewSyncer(store *Store, dataDir string, keyWrapper crypto.KeyWrapper, encStore *account.Store) *Syncer {
@@ -98,7 +105,48 @@ func NewSyncer(store *Store, dataDir string, keyWrapper crypto.KeyWrapper, encSt
 	}
 	s.runBody = s.executeSync
 	s.dial = s.connectIMAP
+	s.bgCtx, s.stopBg = context.WithCancel(context.Background())
 	return s
+}
+
+// Stop cancels syncs started by TriggerSync and waits for them to record
+// their progress and exit, or for ctx to end. Scheduled syncs are stopped by
+// cancelling the context passed to SyncAll.
+func (s *Syncer) Stop(ctx context.Context) error {
+	s.stopBg()
+	done := make(chan struct{})
+	go func() {
+		s.bg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// SweepTempFiles removes temp files left in the data dir by writes that a
+// crash or kill interrupted between create and rename (".eml.tmp.*",
+// ".eml.enc.tmp.*"). Call it only while nothing is syncing.
+func (s *Syncer) SweepTempFiles() (int, error) {
+	var removed int
+	err := filepath.WalkDir(s.dataDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() || !(strings.HasPrefix(name, ".eml.tmp.") || strings.HasPrefix(name, ".eml.enc.tmp.")) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		removed++
+		return nil
+	})
+	return removed, err
 }
 
 // throttleMarkers are substrings (matched case-insensitively) that a provider
@@ -365,12 +413,14 @@ func (s *Syncer) TriggerSync(ctx context.Context, accountID int64, coalesceWindo
 	}
 
 	// Execute asynchronously. The goroutine owns the lock from here and releases
-	// it when the sync completes. context.Background() is used (not the request
-	// context) so the sync is not cancelled when the HTTP response is written.
+	// it when the sync completes. bgCtx is used (not the request context) so
+	// the sync is not cancelled when the HTTP response is written, only by Stop.
 	run := *syncRun
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		defer lock.Unlock()
-		if err := s.runBody(context.Background(), acct, run); err != nil {
+		if err := s.runBody(s.bgCtx, acct, run); err != nil {
 			s.logger.Error("triggered sync failed", "account_id", accountID, "sync_run_id", run.ID, "error", err)
 		}
 	}()
@@ -459,6 +509,10 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 	throttled := false
 
 	for _, folder := range folders {
+		if ctx.Err() != nil {
+			errors = append(errors, "cancelled before folder "+folder)
+			break
+		}
 		folderLastUID, folderCount, folderErrs := s.syncFolder(ctx, acct, folder, syncRun.ID)
 		if folderLastUID > lastUID {
 			lastUID = folderLastUID
@@ -472,7 +526,7 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 		// Store per-folder last UID so other folders with
 		// lower UID spaces don't get skipped forever.
 		if folderLastUID > 0 {
-			if err := s.store.accountSt.UpsertFolderSyncState(ctx, acct.ID, folder, folderLastUID); err != nil {
+			if err := s.store.accountSt.UpsertFolderSyncState(context.WithoutCancel(ctx), acct.ID, folder, folderLastUID); err != nil {
 				s.logger.Warn("failed to store folder sync state", "folder", folder, "error", err)
 			}
 		}
@@ -507,7 +561,8 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 		}
 	}
 
-	_, err := s.store.accountSt.UpdateSyncRunStatus(ctx, syncRun.ID, emailsBackedUp, errorsStr, finalStatus, lastUID)
+	// Record the outcome even when the run was cancelled (shutdown, run cap).
+	_, err := s.store.accountSt.UpdateSyncRunStatus(context.WithoutCancel(ctx), syncRun.ID, emailsBackedUp, errorsStr, finalStatus, lastUID)
 	if err != nil {
 		s.logger.Error("failed to update sync run status", "sync_run_id", syncRun.ID, "error", err)
 	}
@@ -1198,6 +1253,9 @@ func (s *Syncer) SyncAll(ctx context.Context) {
 	}
 
 	for _, acctWithSync := range accounts {
+		if ctx.Err() != nil {
+			return
+		}
 		acct := acctWithSync.Account
 
 		if until, yes := s.throttledUntil(ctx, acct.ID); yes {
