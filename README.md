@@ -72,11 +72,15 @@ KATCHUP_API_TOKEN=$(openssl rand -hex 32)    # enables the /api/* automation sur
 KATCHUP_UI_KEY=$(openssl rand -hex 16)       # web-UI access key (or create one on first visit)
 EOF
 
-# 2. Bring it up (katchup + meilisearch).
+# 2. Create the data dir, writable by the container user (uid 100, gid 101).
+#    Alternatively, add `user: "<your uid>:<your gid>"` to the katchup service.
+mkdir -p data && sudo chown -R 100:101 data
+
+# 3. Bring it up (katchup + meilisearch).
 docker compose pull
 docker compose up -d
 
-# 3. Add a mailbox in the web UI, then let it sync.
+# 4. Add a mailbox in the web UI, then let it sync.
 open http://localhost:8080
 ```
 
@@ -85,14 +89,9 @@ access key. To prove you run the server, it also asks for a one-time setup
 token that katchup prints to its log at startup:
 `docker compose logs katchup | grep setup_token`.
 
-The archive (database + encrypted blobs) lives in the `katchup_data` named
-volume, which Docker creates owned by the container's non-root user. To keep
-it in a host directory instead, swap the volume for a bind mount in
-`docker-compose.yml` — the directory must exist and be writable by the
-container user: `mkdir data && sudo chown -R 100:101 data`, or add
-`user: "<uid>:<gid>"` to run as your own user. (Upgrading from a release that
-bind-mounted `./data`: keep that bind mount, it still works with the right
-ownership.)
+The archive (database + encrypted blobs) lives in `./data`, bind-mounted into
+the container. If the directory is missing, Docker creates it owned by root and
+katchup (which runs as uid 100) can't create its database — hence step 2.
 
 > ⚠️ **Back up `KATCHUP_MASTER_KEY` out of band.** It is derived (SHA-256) into
 > the key that unwraps every message and every stored IMAP password. **Lose it

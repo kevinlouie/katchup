@@ -4,13 +4,14 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # Named volume: Docker seeds it from the image, so it is owned by the
-      # container's non-root user (uid 100) and works on a fresh clone. To keep
-      # the archive in a host directory instead, use a bind mount the container
-      # user can write — create it first and either `chown -R 100:101 ./data`,
-      # or run as your own user by adding `user: "1000:1000"` (your `id -u`:`id -g`):
-      #   - ./data:/app/data
-      - katchup_data:/app/data
+      # The archive (database + encrypted blobs) lives in ./data. The container
+      # runs as uid 100 (gid 101), so the directory must exist and be writable
+      # by it before the first start — otherwise Docker creates it root-owned
+      # and katchup can't create its database:
+      #   mkdir -p data && sudo chown -R 100:101 data
+      # Or keep it owned by you and run as your own user by adding
+      # `user: "1000:1000"` (your `id -u`:`id -g`) to this service.
+      - ./data:/app/data
     environment:
       - DB_PATH=/app/data/katchup.db
       - KATCHUP_LISTEN=:8080
@@ -63,5 +64,4 @@ services:
       retries: 3
 
 volumes:
-  katchup_data:
   meili_data:
