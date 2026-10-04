@@ -1160,7 +1160,7 @@ func (s *Syncer) writeEML(path string, data []byte) error {
 		return fmt.Errorf("rename to final path: %w", err)
 	}
 
-	return nil
+	return crypto.SyncDir(dir)
 }
 
 func (s *Syncer) SyncAll(ctx context.Context) {

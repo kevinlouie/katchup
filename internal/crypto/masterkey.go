@@ -179,6 +179,14 @@ func EncryptFile(path string, plaintext []byte, wrapper KeyWrapper) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("crypto: write encrypted file: %w", err)
 	}
+	// fsync before the rename: the caller records the blob in the DB right
+	// after, so the file must be on disk first or a power loss could leave a
+	// truncated blob the index says is archived (and never refetches).
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("crypto: sync encrypted file: %w", err)
+	}
 	if err := tmpFile.Chmod(0600); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpName)
@@ -194,6 +202,19 @@ func EncryptFile(path string, plaintext []byte, wrapper KeyWrapper) error {
 		return fmt.Errorf("crypto: rename encrypted file: %w", err)
 	}
 
+	return SyncDir(dir)
+}
+
+// SyncDir fsyncs a directory so a rename into it survives a crash.
+func SyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("crypto: open dir for sync: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("crypto: sync dir: %w", err)
+	}
 	return nil
 }
 
