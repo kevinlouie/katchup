@@ -109,21 +109,44 @@ var throttleMarkers = []string{
 	"bandwidth",
 	"over quota",
 	"overquota",
-	"too many simultaneous",
-	"too many connections",
-	"too many login",
 	"too many messages",
 }
 
-// isThrottleError reports whether an error message looks like provider throttling.
-func isThrottleError(msg string) bool {
+// connLimitMarkers signal a connection/login-count limit rather than a daily
+// cap: it clears as soon as the other sessions (often the user's own mail
+// clients) go away, so it only earns connLimitCooldown, not ThrottleCooldown.
+var connLimitMarkers = []string{
+	"too many simultaneous",
+	"too many connections",
+	"too many login",
+}
+
+// connLimitCooldown is the backoff after a connection-count limit.
+const connLimitCooldown = 15 * time.Minute
+
+func containsAny(msg string, markers []string) bool {
 	m := strings.ToLower(msg)
-	for _, k := range throttleMarkers {
+	for _, k := range markers {
 		if strings.Contains(m, k) {
 			return true
 		}
 	}
 	return false
+}
+
+// isThrottleError reports whether an error message looks like provider throttling.
+func isThrottleError(msg string) bool {
+	return containsAny(msg, throttleMarkers) || containsAny(msg, connLimitMarkers)
+}
+
+// cooldownFor returns how long to back off after a run that recorded errs:
+// the short connLimitCooldown when every throttle signal in it is a
+// connection-count limit, the full ThrottleCooldown otherwise.
+func (s *Syncer) cooldownFor(errs string) time.Duration {
+	if containsAny(errs, throttleMarkers) {
+		return s.ThrottleCooldown
+	}
+	return min(connLimitCooldown, s.ThrottleCooldown)
 }
 
 // containsThrottle reports whether any error in the slice looks like throttling.
@@ -155,9 +178,13 @@ func (s *Syncer) throttledUntil(ctx context.Context, accountID int64) (time.Time
 	if err != nil {
 		return time.Time{}, false
 	}
-	until := finished.Add(s.ThrottleCooldown)
-	if time.Since(finished) < s.ThrottleCooldown {
-		return until, true
+	var errs string
+	if last.Errors != nil {
+		errs = *last.Errors
+	}
+	cooldown := s.cooldownFor(errs)
+	if time.Since(finished) < cooldown {
+		return finished.Add(cooldown), true
 	}
 	return time.Time{}, false
 }
@@ -456,7 +483,7 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 		if containsThrottle(folderErrs) {
 			throttled = true
 			s.logger.Warn("provider throttling detected — backing off",
-				"account_id", acct.ID, "folder", folder, "cooldown", s.ThrottleCooldown)
+				"account_id", acct.ID, "folder", folder, "cooldown", s.cooldownFor(strings.Join(folderErrs, "; ")))
 			break
 		}
 	}

@@ -35,13 +35,42 @@ func TestIsThrottleError(t *testing.T) {
 // so the account should be in cooldown.
 func seedThrottledRun(t *testing.T, s *Syncer, accountID int64) {
 	t.Helper()
+	seedThrottledRunWith(t, s, accountID, "bandwidth limit")
+}
+
+func seedThrottledRunWith(t *testing.T, s *Syncer, accountID int64, errs string) {
+	t.Helper()
 	ctx := context.Background()
 	run, err := s.store.accountSt.CreateSyncRun(ctx, accountID)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	if _, err := s.store.accountSt.UpdateSyncRunStatus(ctx, run.ID, 0, "bandwidth limit", "throttled", 0); err != nil {
+	if _, err := s.store.accountSt.UpdateSyncRunStatus(ctx, run.ID, 0, errs, "throttled", 0); err != nil {
 		t.Fatalf("mark throttled: %v", err)
+	}
+}
+
+// TestConnectionLimitCooldownIsShort: a "too many connections" refusal backs
+// off for connLimitCooldown, not the 24h bandwidth-cap cooldown.
+func TestConnectionLimitCooldownIsShort(t *testing.T) {
+	s, accountID, _, release := newTriggerSyncer(t)
+	close(release)
+	ctx := context.Background()
+
+	seedThrottledRunWith(t, s, accountID, "folder INBOX: connect: login: Too many simultaneous connections")
+	until, yes := s.throttledUntil(ctx, accountID)
+	if !yes {
+		t.Fatal("expected a short cooldown")
+	}
+	if d := time.Until(until); d > connLimitCooldown {
+		t.Errorf("connection-limit cooldown = %v, want <= %v", d, connLimitCooldown)
+	}
+
+	// A bandwidth cap in the same run still gets the full cooldown.
+	seedThrottledRunWith(t, s, accountID, "too many connections; [ALERT] bandwidth limits exceeded")
+	until, _ = s.throttledUntil(ctx, accountID)
+	if d := time.Until(until); d < s.ThrottleCooldown-time.Minute {
+		t.Errorf("bandwidth cooldown = %v, want ~%v", d, s.ThrottleCooldown)
 	}
 }
 
