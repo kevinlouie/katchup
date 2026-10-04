@@ -55,7 +55,7 @@ func TestReconcileUIDValidity(t *testing.T) {
 
 	// First sight of the server value: adopt it, keep the watermark, and stamp
 	// the legacy rows so they still count as archived.
-	got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100)
+	got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100, 0)
 	if err != nil || got != 50 {
 		t.Fatalf("adopt: got %d, %v; want 50", got, err)
 	}
@@ -67,12 +67,12 @@ func TestReconcileUIDValidity(t *testing.T) {
 	}
 
 	// Unchanged: resume from the watermark.
-	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100); err != nil || got != 50 {
+	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100, 0); err != nil || got != 50 {
 		t.Fatalf("unchanged: got %d, %v; want 50", got, err)
 	}
 
 	// Server reports no UIDVALIDITY: leave everything as is.
-	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 0); err != nil || got != 50 {
+	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 0, 0); err != nil || got != 50 {
 		t.Fatalf("server 0: got %d, %v; want 50", got, err)
 	}
 	if _, v := folderState(t, s, accountID, "INBOX"); v != 100 {
@@ -80,7 +80,7 @@ func TestReconcileUIDValidity(t *testing.T) {
 	}
 
 	// Renumbered: reset the watermark so new mail below it isn't skipped.
-	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 200); err != nil || got != 0 {
+	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 200, 0); err != nil || got != 0 {
 		t.Fatalf("changed: got %d, %v; want 0", got, err)
 	}
 	if last, v := folderState(t, s, accountID, "INBOX"); last != 0 || v != 200 {
@@ -101,11 +101,106 @@ func TestReconcileUIDValidity(t *testing.T) {
 	}
 
 	// Folders are independent: a fresh folder starts at 0 and records the value.
-	if got, err := s.reconcileUIDValidity(ctx, accountID, "Archive", 7); err != nil || got != 0 {
+	if got, err := s.reconcileUIDValidity(ctx, accountID, "Archive", 7, 0); err != nil || got != 0 {
 		t.Fatalf("new folder: got %d, %v; want 0", got, err)
 	}
 	if _, v := folderState(t, s, accountID, "Archive"); v != 7 {
 		t.Fatalf("new folder: stored UIDVALIDITY %d, want 7", v)
+	}
+}
+
+// TestReconcileUIDValidityFirstSightUIDNext: on first sight of a folder's
+// UIDVALIDITY, UIDNEXT tells whether the pre-tracking watermark still fits
+// the server's numbering.
+func TestReconcileUIDValidityFirstSightUIDNext(t *testing.T) {
+	tests := []struct {
+		name     string
+		uidNext  int64
+		wantLast int64 // returned and stored watermark
+		stamped  bool  // legacy row moved to the server's generation
+	}{
+		{"consistent: adopt and keep the watermark", 51, 50, true},
+		{"UIDNEXT unknown: adopt as before", 0, 50, true},
+		{"renumbered before tracking: re-scan, leave old rows", 50, 0, false},
+		{"renumbered, UIDNEXT well below the watermark", 4, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, accountID, _ := newTestSyncer(t)
+			ctx := context.Background()
+			if err := s.store.accountSt.UpsertFolderSyncState(ctx, accountID, "INBOX", 50); err != nil {
+				t.Fatal(err)
+			}
+			insertTestMessage(t, s.store, accountID, "INBOX", 0, 3)
+
+			got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100, tt.uidNext)
+			if err != nil || got != tt.wantLast {
+				t.Fatalf("got %d, %v; want %d", got, err, tt.wantLast)
+			}
+			if last, v := folderState(t, s, accountID, "INBOX"); last != tt.wantLast || v != 100 {
+				t.Fatalf("state = (%d, %d), want (%d, 100)", last, v, tt.wantLast)
+			}
+			if stamped := exists(t, s.store, accountID, "INBOX", 100, 3); stamped != tt.stamped {
+				t.Fatalf("legacy row stamped = %v, want %v", stamped, tt.stamped)
+			}
+			if !tt.stamped && !exists(t, s.store, accountID, "INBOX", 0, 3) {
+				t.Fatal("legacy row lost")
+			}
+
+			// Idempotent: the next run sees the recorded generation.
+			if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100, max(tt.uidNext, 51)); err != nil || got != tt.wantLast {
+				t.Fatalf("second call: got %d, %v; want %d", got, err, tt.wantLast)
+			}
+		})
+	}
+}
+
+// TestReconcileUIDValiditySameGenerationBadUIDNext: an unchanged UIDVALIDITY
+// with UIDNEXT at or below the watermark (a server bug) re-scans this run
+// without discarding the stored watermark.
+func TestReconcileUIDValiditySameGenerationBadUIDNext(t *testing.T) {
+	s, accountID, _ := newTestSyncer(t)
+	ctx := context.Background()
+	if err := s.store.accountSt.SetFolderSyncState(ctx, accountID, "INBOX", 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.reconcileUIDValidity(ctx, accountID, "INBOX", 100, 20); err != nil || got != 0 {
+		t.Fatalf("got %d, %v; want 0", got, err)
+	}
+	if last, v := folderState(t, s, accountID, "INBOX"); last != 50 || v != 100 {
+		t.Fatalf("state = (%d, %d), want (50, 100) untouched", last, v)
+	}
+}
+
+// TestSyncFolderRenumberedBeforeTracking: end to end, a folder whose old
+// watermark is above the server's UIDNEXT has its new mail archived instead
+// of skipped forever.
+func TestSyncFolderRenumberedBeforeTracking(t *testing.T) {
+	s, accountID, _ := newTestSyncer(t)
+	f := newFakeIMAP(t)
+	useFakeIMAP(s, f)
+	f.setUIDValidity(1700)
+	ctx := context.Background()
+
+	if err := s.store.accountSt.UpsertFolderSyncState(ctx, accountID, "INBOX", 500); err != nil {
+		t.Fatal(err)
+	}
+	insertTestMessage(t, s.store, accountID, "INBOX", 0, 2)
+	f.add(1, 2, 3)
+
+	if err := s.Run(ctx, accountID); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, uid := range []int64{1, 2, 3} {
+		if !exists(t, s.store, accountID, "INBOX", 1700, uid) {
+			t.Errorf("UID %d of the renumbered folder not archived", uid)
+		}
+	}
+	if !exists(t, s.store, accountID, "INBOX", 0, 2) {
+		t.Error("pre-tracking row lost")
+	}
+	if last, v := folderState(t, s, accountID, "INBOX"); last != 3 || v != 1700 {
+		t.Errorf("state = (%d, %d), want (3, 1700)", last, v)
 	}
 }
 

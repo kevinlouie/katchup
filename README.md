@@ -50,7 +50,9 @@ data/
 UIDs are tracked together with each folder's `UIDVALIDITY`. If the server
 renumbers a folder (a migration or restore on the provider side), katchup
 notices, keeps everything already archived, and re-scans that folder from the
-start — re-downloading it, but storing only content it doesn't already have.
+start — re-downloading it, but storing only content it doesn't already have. The
+same happens, on first sight of a folder's UIDVALIDITY, if the server's
+`UIDNEXT` shows the folder was already renumbered before katchup tracked it.
 Files written before UIDVALIDITY tracking are named `<YYYY-MM-DD>_<uid>.eml.enc`.
 
 A message that keeps failing to archive for a reason of its own (e.g. the

@@ -599,7 +599,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 
 	// Resume from this folder's watermark — unless the server renumbered the
 	// folder since it was recorded, in which case start over.
-	lastSyncUID, err := s.reconcileUIDValidity(ctx, acct.ID, folder, uidValidity)
+	lastSyncUID, err := s.reconcileUIDValidity(ctx, acct.ID, folder, uidValidity, int64(mbox.UidNext))
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("folder %s: sync state: %v", folder, err))
 		return 0, 0, errs
@@ -915,22 +915,51 @@ func idleTimeout(batch []uint32, sizes map[uint32]int64) time.Duration {
 // reconcileUIDValidity compares a folder's UIDVALIDITY on the server with the
 // one recorded alongside its watermark and returns the UID to resume after:
 //   - first time seen (recorded 0): adopt it, keep the watermark, and stamp the
-//     folder's pre-tracking messages with it so they still count as archived;
+//     folder's pre-tracking messages with it so they still count as archived —
+//     unless UIDNEXT shows the folder was renumbered before tracking began;
 //   - unchanged: the stored watermark;
 //   - changed: the server renumbered the folder, so every recorded UID is
 //     meaningless — reset the watermark to 0 and re-scan. Archived messages are
 //     kept under their old generation; content dedup avoids rewriting blobs.
 //
-// A server reporting no UIDVALIDITY (0) leaves the old behaviour untouched.
-func (s *Syncer) reconcileUIDValidity(ctx context.Context, accountID int64, folder string, uidValidity int64) (int64, error) {
+// uidNext is the server's UIDNEXT from the same SELECT (0 = not reported). A
+// server reporting no UIDVALIDITY (0) leaves the old behaviour untouched.
+func (s *Syncer) reconcileUIDValidity(ctx context.Context, accountID int64, folder string, uidValidity, uidNext int64) (int64, error) {
 	lastUID, stored, err := s.store.accountSt.GetFolderSyncState(ctx, accountID, folder)
 	if err != nil {
 		return 0, err
 	}
+	// Every UID the server has assigned is below UIDNEXT, so a watermark at or
+	// above it can't belong to the current numbering.
+	behindWatermark := uidNext != 0 && uidNext <= lastUID
 	switch {
-	case uidValidity == 0 || stored == uidValidity:
+	case uidValidity == 0:
 		return lastUID, nil
+	case stored == uidValidity:
+		if behindWatermark {
+			// Same generation but impossible UIDs — a server bug. Re-scan this
+			// run (archived UIDs are skipped before any body is fetched) without
+			// moving the stored watermark until a batch succeeds.
+			s.logger.Warn("folder UIDNEXT is at or below the watermark despite unchanged UIDVALIDITY — re-scanning",
+				"account_id", accountID, "folder", folder, "uidnext", uidNext, "last_uid", lastUID)
+			return 0, nil
+		}
+		return lastUID, nil
+	case stored == 0 && behindWatermark:
+		// Renumbered before UIDVALIDITY was tracked (e.g. a Gmail label deleted
+		// and recreated under the same name): the old rows belong to an unknown
+		// earlier generation, so leave them at 0 rather than stamp them — they
+		// would otherwise shadow new mail with the same UIDs — and re-scan.
+		s.logger.Warn("folder was renumbered before UIDVALIDITY tracking (UIDNEXT at or below the watermark) — re-scanning from UID 1",
+			"account_id", accountID, "folder", folder, "uidnext", uidNext, "last_uid", lastUID, "uidvalidity", uidValidity)
+		if err := s.store.accountSt.SetFolderSyncState(ctx, accountID, folder, uidValidity, 0); err != nil {
+			return 0, err
+		}
+		return 0, nil
 	case stored == 0:
+		// Stamp first, then record the generation: if the process dies in
+		// between, the next run sees stored == 0 again and redoes both
+		// (stamping only touches rows still at 0).
 		if err := s.store.AdoptUIDValidity(ctx, accountID, folder, uidValidity); err != nil {
 			return 0, err
 		}
