@@ -29,7 +29,18 @@ const (
 	// its own timer in syncFolder), so a silently dead connection fails the
 	// folder instead of wedging the run — and the per-account lock — forever.
 	commandTimeout = 2 * time.Minute
-	fetchTimeout   = 120 * time.Second
+	// fetchTimeout is how long a body fetch may stall before it is aborted
+	// (plus a size-based allowance, see idleTimeout).
+	fetchTimeout = 120 * time.Second
+	// fetchMinRate (bytes/s) sizes that allowance for a large message.
+	fetchMinRate = 64 << 10
+	// fetchBatchBytes caps a batch by RFC822.SIZE; fetchBatchSize by count.
+	fetchBatchBytes = 32 << 20
+	// fetchBuffer is how many fetched messages may queue between the IMAP
+	// reader and the writer — the bound on bodies held in memory at once.
+	fetchBuffer = 4
+	// sizeFetchChunk is how many UIDs one RFC822.SIZE fetch asks about.
+	sizeFetchChunk = 5000
 	// maxRunDuration caps one sync run. Progress is persisted per batch, so a
 	// run cut off here resumes from its watermark on the next sync.
 	maxRunDuration = 6 * time.Hour
@@ -60,6 +71,9 @@ type Syncer struct {
 	// executeSync) so tests can stub the real IMAP work when exercising the
 	// trigger/coalesce coordination without a live IMAP server.
 	runBody func(ctx context.Context, acct account.Account, syncRun account.SyncRun) error
+	// dial opens a logged-in IMAP connection (default connectIMAP); a field so
+	// tests can point the real sync path at an in-process server.
+	dial func(acct account.Account) (*client.Client, error)
 }
 
 func NewSyncer(store *Store, dataDir string, keyWrapper crypto.KeyWrapper, encStore *account.Store) *Syncer {
@@ -73,6 +87,7 @@ func NewSyncer(store *Store, dataDir string, keyWrapper crypto.KeyWrapper, encSt
 		ThrottleCooldown: 24 * time.Hour,
 	}
 	s.runBody = s.executeSync
+	s.dial = s.connectIMAP
 	return s
 }
 
@@ -475,7 +490,7 @@ func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun 
 }
 
 func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder string, syncRunID int64) (lastUID int64, count int64, errs []string) {
-	c, err := s.connectIMAP(acct)
+	c, err := s.dial(acct)
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("folder %s: connect: %v", folder, err))
 		return 0, 0, errs
@@ -527,18 +542,25 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	total := len(uids)
 	s.logger.Info("found messages to sync", "folder", folder, "account_id", acct.ID, "count", total)
 
-	// go-imap v1.2.1's UidFetch loads every requested message into memory and
-	// has no context. Fetching an entire large mailbox (tens of thousands of
-	// full RFC822 bodies) in one call exhausts memory and cannot finish inside
-	// any sane timeout. Fetch in bounded batches instead: memory stays capped
-	// at one batch, each batch has its own timeout, and progress is persisted
-	// after every batch so an interrupted sync resumes from a watermark
-	// instead of restarting from zero.
+	// go-imap v1.2.1's UidFetch has no context and parses each message fully
+	// into memory. Fetching a whole large mailbox in one call cannot finish
+	// inside any sane timeout, so fetch in batches capped by count AND by bytes
+	// (planned from RFC822.SIZE): a batch of a few huge messages stays small, and
+	// progress is persisted after every batch so an interrupted sync resumes
+	// from a watermark instead of restarting from zero. Memory is bounded
+	// separately by the small msgCh buffer below.
 	// BODY.PEEK[] fetches the full message WITHOUT setting the \Seen flag, so
 	// backing up never changes read/unread state on the server. Plain RFC822
 	// (== BODY[]) would mark every fetched message as read.
 	bodySection := &imap.BodySectionName{Peek: true}
 	fetchItems := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, bodySection.FetchItem()}
+
+	sizes, err := fetchSizes(c, uids)
+	if err != nil {
+		// Not fatal: batches fall back to the count cap alone.
+		s.logger.Warn("failed to fetch message sizes; batching by count only", "folder", folder, "error", err)
+	}
+	batches := planBatches(uids, sizes, fetchBatchSize, fetchBatchBytes)
 
 	// The watermark must only advance over UIDs that were written
 	// successfully: track the highest success and the lowest failure.
@@ -547,28 +569,30 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	// were never fetched are retried next run instead of being skipped.
 	var maxSuccess, minFailed, safeWatermark int64
 
-	for start := 0; start < total; start += fetchBatchSize {
+	for _, batch := range batches {
 		if ctx.Err() != nil {
 			errs = appendErr(errs, fmt.Sprintf("folder %s: cancelled after %d/%d", folder, count, total))
 			return safeWatermark, count, errs
 		}
 
-		end := min(start+fetchBatchSize, total)
 		uidSet := new(imap.SeqSet)
-		for _, uid := range uids[start:end] {
-			uidSet.AddNum(uid)
-		}
+		uidSet.AddNum(batch...)
 
-		// Buffer sized to the batch so UidFetch never blocks sending; the
-		// library closes msgCh after UidFetch returns, so we must NOT close it.
-		msgCh := make(chan *imap.Message, end-start)
+		// A small buffer bounds memory: when it is full the library's reader
+		// blocks, which back-pressures the server instead of parsing the rest
+		// of the batch into RAM. The library closes msgCh after UidFetch
+		// returns, so we must NOT close it.
+		msgCh := make(chan *imap.Message, fetchBuffer)
 		fetchDone := make(chan error, 1)
-		// The drain loop's timer bounds the fetch; c.Timeout would put a
+		// The drain loop's idle timer bounds the fetch; c.Timeout would put a
 		// deadline on the whole batch transfer instead.
 		c.Timeout = 0
 		go func() { fetchDone <- c.UidFetch(uidSet, fetchItems, msgCh) }()
 
-		timer := time.NewTimer(fetchTimeout)
+		// Abort only if the server goes quiet: the timer restarts on every
+		// message, with extra allowance for the largest one in the batch.
+		idle := idleTimeout(batch, sizes)
+		timer := time.NewTimer(idle)
 		aborted := ""
 	drain:
 		for {
@@ -577,6 +601,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 				if !ok {
 					break drain
 				}
+				timer.Reset(idle)
 				if err := s.fetchAndWriteMessage(ctx, acct, folder, uidValidity, msg.Uid, msg); err != nil {
 					errMsg := fmt.Sprintf("folder %s: UID %d: %v", folder, msg.Uid, err)
 					s.logger.Error(errMsg)
@@ -591,7 +616,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 					maxSuccess = int64(msg.Uid)
 				}
 			case <-timer.C:
-				aborted = fmt.Sprintf("folder %s: fetch timed out after %v at %d/%d", folder, fetchTimeout, count, total)
+				aborted = fmt.Sprintf("folder %s: fetch stalled for %v at %d/%d", folder, idle, count, total)
 				break drain
 			case <-ctx.Done():
 				aborted = fmt.Sprintf("folder %s: cancelled at %d/%d", folder, count, total)
@@ -601,9 +626,14 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 		timer.Stop()
 
 		if aborted != "" {
-			// Kill the connection so the in-flight UidFetch unblocks, then
-			// wait for its goroutine before the deferred Logout runs.
+			// Kill the connection so the in-flight UidFetch unblocks — draining
+			// msgCh in case its reader is blocked on the full buffer — then
+			// wait for it before the deferred Logout runs.
 			c.Close()
+			go func() {
+				for range msgCh {
+				}
+			}()
 			<-fetchDone
 			errs = appendErr(errs, aborted)
 			return safeWatermark, count, errs
@@ -612,7 +642,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 		err := <-fetchDone
 		c.Timeout = commandTimeout
 		if err != nil {
-			errs = appendErr(errs, fmt.Sprintf("folder %s: fetch batch %d-%d: %v", folder, start, end, err))
+			errs = appendErr(errs, fmt.Sprintf("folder %s: fetch UIDs %d-%d: %v", folder, batch[0], batch[len(batch)-1], err))
 			return safeWatermark, count, errs
 		}
 
@@ -642,6 +672,60 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	}
 
 	return watermark(maxSuccess, minFailed), count, errs
+}
+
+// fetchSizes returns the RFC822.SIZE of each of uids, so batches can be planned
+// by bytes before any body is downloaded. Metadata only — a few dozen bytes per
+// message — fetched in chunks so each command finishes well inside c.Timeout.
+func fetchSizes(c *client.Client, uids []uint32) (map[uint32]int64, error) {
+	sizes := make(map[uint32]int64, len(uids))
+	for start := 0; start < len(uids); start += sizeFetchChunk {
+		set := new(imap.SeqSet)
+		set.AddNum(uids[start:min(start+sizeFetchChunk, len(uids))]...)
+		ch := make(chan *imap.Message, 64)
+		done := make(chan error, 1)
+		go func() { done <- c.UidFetch(set, []imap.FetchItem{imap.FetchUid, imap.FetchRFC822Size}, ch) }()
+		for msg := range ch {
+			sizes[msg.Uid] = int64(msg.Size)
+		}
+		if err := <-done; err != nil {
+			return nil, err
+		}
+	}
+	return sizes, nil
+}
+
+// planBatches splits uids (in order) into fetch batches of at most maxCount
+// messages and, where sizes are known, at most maxBytes — except that a single
+// message larger than maxBytes gets a batch of its own.
+func planBatches(uids []uint32, sizes map[uint32]int64, maxCount int, maxBytes int64) [][]uint32 {
+	var batches [][]uint32
+	var cur []uint32
+	var curBytes int64
+	for _, uid := range uids {
+		size := sizes[uid]
+		if len(cur) > 0 && (len(cur) >= maxCount || curBytes+size > maxBytes) {
+			batches = append(batches, cur)
+			cur, curBytes = nil, 0
+		}
+		cur = append(cur, uid)
+		curBytes += size
+	}
+	if len(cur) > 0 {
+		batches = append(batches, cur)
+	}
+	return batches
+}
+
+// idleTimeout is how long a batch fetch may go without delivering a message:
+// fetchTimeout, plus time to transfer the batch's largest message at a slow
+// (fetchMinRate) link, since go-imap only delivers a message once fully read.
+func idleTimeout(batch []uint32, sizes map[uint32]int64) time.Duration {
+	var largest int64
+	for _, uid := range batch {
+		largest = max(largest, sizes[uid])
+	}
+	return fetchTimeout + time.Duration(largest/fetchMinRate)*time.Second
 }
 
 // reconcileUIDValidity compares a folder's UIDVALIDITY on the server with the
