@@ -44,7 +44,10 @@ func main() {
 
 	// Open SQLite database. modernc/sqlite applies _pragma to every new
 	// pooled connection — a plain `PRAGMA` Exec only reaches one connection.
-	db, err := sql.Open("sqlite", cfg.DBPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
+	// busy_timeout (first, so it also covers the pragmas after it) makes a
+	// connection wait for a concurrent writer — sync vs. UI/API writes on the
+	// pool — instead of failing at once with "database is locked".
+	db, err := sql.Open("sqlite", cfg.DBPath+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
