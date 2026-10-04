@@ -163,16 +163,32 @@ func (s *Store) UpdateAccount(ctx context.Context, id int64, name, host string, 
 	return toAccount(acct), nil
 }
 
-// DeleteAccount removes an account by ID. Cascade deletes sync_runs.
+// DeleteAccount soft-deletes an account: it stops syncing and its stored
+// password is wiped, but the row stays so the mail archived from it keeps its
+// index (blobs/messages would otherwise cascade away, orphaning the files).
+// A deleted account is invisible to GetAccount and ListAccounts.
 func (s *Store) DeleteAccount(ctx context.Context, id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.queries.DeleteAccount(ctx, id); err != nil {
+	if err := s.queries.SoftDeleteAccount(ctx, id); err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
 
 	return nil
+}
+
+// ListAllAccountIDs returns the id of every account that may own archived
+// mail, deleted ones included.
+func (s *Store) ListAllAccountIDs(ctx context.Context) ([]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ids, err := s.queries.ListAllAccountIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list account ids: %w", err)
+	}
+	return ids, nil
 }
 
 // CreateSyncRun creates a new sync run record for an account.

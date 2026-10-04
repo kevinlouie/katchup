@@ -12,7 +12,9 @@ touches the live account.
 
 - **Non-mutating.** Fetches with `BODY.PEEK[]` — never sets `\Seen`, never
   `STORE`/`APPEND`/`EXPUNGE`. Backing up your mail can't change it. Deleting or
-  re-labelling mail on the server never deletes it here.
+  re-labelling mail on the server never deletes it here. Deleting an account
+  in katchup stops syncing it and erases its stored password, but keeps the
+  mail already archived (still browsable, searchable, and backfillable).
 - **Encrypted at rest.** Every message is AES-256-GCM encrypted before it hits
   disk. Lose the server, keep your privacy.
 - **Single stateful service.** One Go binary + SQLite. Message *blobs* are

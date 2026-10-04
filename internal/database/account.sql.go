@@ -7,12 +7,13 @@ package database
 
 import (
 	"context"
+	"database/sql"
 )
 
 const createAccount = `-- name: CreateAccount :one
 INSERT INTO accounts (name, host, port, username, encrypted_password, use_ssl, folders)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-RETURNING id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at
+RETURNING id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at, deleted_at
 `
 
 type CreateAccountParams struct {
@@ -47,25 +48,18 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (A
 		&i.Folders,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
 	)
 	return i, err
 }
 
-const deleteAccount = `-- name: DeleteAccount :exec
-DELETE FROM accounts WHERE id = ?1
-`
-
-func (q *Queries) DeleteAccount(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, deleteAccount, id)
-	return err
-}
-
 const getAccount = `-- name: GetAccount :one
-SELECT id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at
+SELECT id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at, deleted_at
 FROM accounts
-WHERE id = ?1
+WHERE id = ?1 AND deleted_at IS NULL
 `
 
+// Deleted accounts are invisible to everything but the archive itself.
 func (q *Queries) GetAccount(ctx context.Context, id int64) (Account, error) {
 	row := q.db.QueryRowContext(ctx, getAccount, id)
 	var i Account
@@ -80,30 +74,33 @@ func (q *Queries) GetAccount(ctx context.Context, id int64) (Account, error) {
 		&i.Folders,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
 	)
 	return i, err
 }
 
 const listAccounts = `-- name: ListAccounts :many
-SELECT id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at,
+SELECT id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at, deleted_at,
     (SELECT COUNT(*) FROM sync_runs WHERE account_id = accounts.id AND status = 'running')
     AS is_syncing
 FROM accounts
+WHERE deleted_at IS NULL
 ORDER BY name ASC
 `
 
 type ListAccountsRow struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	Host              string `json:"host"`
-	Port              int64  `json:"port"`
-	Username          string `json:"username"`
-	EncryptedPassword string `json:"encrypted_password"`
-	UseSsl            int64  `json:"use_ssl"`
-	Folders           string `json:"folders"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
-	IsSyncing         int64  `json:"is_syncing"`
+	ID                int64          `json:"id"`
+	Name              string         `json:"name"`
+	Host              string         `json:"host"`
+	Port              int64          `json:"port"`
+	Username          string         `json:"username"`
+	EncryptedPassword string         `json:"encrypted_password"`
+	UseSsl            int64          `json:"use_ssl"`
+	Folders           string         `json:"folders"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
+	DeletedAt         sql.NullString `json:"deleted_at"`
+	IsSyncing         int64          `json:"is_syncing"`
 }
 
 func (q *Queries) ListAccounts(ctx context.Context) ([]ListAccountsRow, error) {
@@ -126,6 +123,7 @@ func (q *Queries) ListAccounts(ctx context.Context) ([]ListAccountsRow, error) {
 			&i.Folders,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.DeletedAt,
 			&i.IsSyncing,
 		); err != nil {
 			return nil, err
@@ -141,6 +139,49 @@ func (q *Queries) ListAccounts(ctx context.Context) ([]ListAccountsRow, error) {
 	return items, nil
 }
 
+const listAllAccountIDs = `-- name: ListAllAccountIDs :many
+SELECT id FROM accounts ORDER BY id
+`
+
+// Every account that owns archived mail, deleted ones included.
+func (q *Queries) ListAllAccountIDs(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listAllAccountIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const softDeleteAccount = `-- name: SoftDeleteAccount :exec
+UPDATE accounts SET
+    deleted_at = datetime('now'),
+    encrypted_password = '',
+    updated_at = datetime('now')
+WHERE id = ?1 AND deleted_at IS NULL
+`
+
+// Stop syncing an account and wipe its stored credential, keeping the row so
+// its archived mail (blobs/messages reference it) survives.
+func (q *Queries) SoftDeleteAccount(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, softDeleteAccount, id)
+	return err
+}
+
 const updateAccount = `-- name: UpdateAccount :one
 UPDATE accounts SET
     name = ?1,
@@ -151,8 +192,8 @@ UPDATE accounts SET
     use_ssl = ?6,
     folders = ?7,
     updated_at = datetime('now')
-WHERE id = ?8
-RETURNING id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at
+WHERE id = ?8 AND deleted_at IS NULL
+RETURNING id, name, host, port, username, encrypted_password, use_ssl, folders, created_at, updated_at, deleted_at
 `
 
 type UpdateAccountParams struct {
@@ -189,6 +230,7 @@ func (q *Queries) UpdateAccount(ctx context.Context, arg UpdateAccountParams) (A
 		&i.Folders,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
 	)
 	return i, err
 }

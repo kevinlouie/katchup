@@ -104,7 +104,7 @@ func ListPage(data PageData) templ.Component {
 				<td class="px-5 py-4">
 					<div class="flex items-center justify-end gap-1.5">
 						<a href="/accounts/%d/edit" class="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-white/20 hover:bg-white/5 hover:text-white">Edit</a>
-						<form method="POST" action="/accounts/%d/delete" onsubmit="return confirm('Delete this account and every synced email? This cannot be undone.')">
+						<form method="POST" action="/accounts/%d/delete" onsubmit="return confirm('Delete this account? Syncing stops and its stored password is erased. Mail already archived is kept and stays browsable and searchable.')">
 							<button type="submit" class="rounded-lg border border-transparent px-3 py-1.5 text-xs font-medium text-red-400/80 transition hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-300">Delete</button>
 						</form>
 					</div>

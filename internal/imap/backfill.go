@@ -41,13 +41,14 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 	}
 
 	// Only backfill accounts that still have a row (FK on blobs/messages).
-	accts, err := s.store.accountSt.ListAccounts(ctx)
+	// Deleted accounts keep theirs, so their archive is rebuilt too.
+	ids, err := s.store.accountSt.ListAllAccountIDs(ctx)
 	if err != nil {
 		return fmt.Errorf("list accounts: %w", err)
 	}
-	known := make(map[int64]bool, len(accts))
-	for _, a := range accts {
-		known[a.ID] = true
+	known := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		known[id] = true
 	}
 
 	// Highest UID seen per (account, folder, uidvalidity), used to set the
@@ -209,19 +210,20 @@ func (s *Store) ReindexAll(ctx context.Context) (int, error) {
 	if _, ok := s.indexer.(search.NoopIndexer); ok {
 		return 0, nil
 	}
-	accts, err := s.accountSt.ListAccounts(ctx)
+	// Deleted accounts included: their archived mail stays searchable.
+	ids, err := s.accountSt.ListAllAccountIDs(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list accounts: %w", err)
 	}
 	const page = 500
 	var indexed int
-	for _, a := range accts {
+	for _, id := range ids {
 		var offset int64
 		for {
 			if ctx.Err() != nil {
 				return indexed, ctx.Err()
 			}
-			msgs, err := s.ListMessages(ctx, MessageFilter{AccountID: a.ID}, page, offset)
+			msgs, err := s.ListMessages(ctx, MessageFilter{AccountID: id}, page, offset)
 			if err != nil {
 				return indexed, fmt.Errorf("list messages: %w", err)
 			}

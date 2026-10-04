@@ -9,16 +9,17 @@ import (
 )
 
 type Account struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	Host              string `json:"host"`
-	Port              int64  `json:"port"`
-	Username          string `json:"username"`
-	EncryptedPassword string `json:"encrypted_password"`
-	UseSsl            int64  `json:"use_ssl"`
-	Folders           string `json:"folders"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID                int64          `json:"id"`
+	Name              string         `json:"name"`
+	Host              string         `json:"host"`
+	Port              int64          `json:"port"`
+	Username          string         `json:"username"`
+	EncryptedPassword string         `json:"encrypted_password"`
+	UseSsl            int64          `json:"use_ssl"`
+	Folders           string         `json:"folders"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
+	DeletedAt         sql.NullString `json:"deleted_at"`
 }
 
 type AccountEncryption struct {

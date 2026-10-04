@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	migrations "katchup/sql/migrations"
+
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -40,46 +43,14 @@ func newTestStore(t *testing.T) (*Store, func()) {
 	}
 }
 
+// createTables applies the real (embedded) migrations.
 func createTables(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE accounts (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			host TEXT NOT NULL,
-			port INTEGER NOT NULL DEFAULT 993,
-			username TEXT NOT NULL,
-			encrypted_password TEXT NOT NULL,
-			use_ssl INTEGER NOT NULL DEFAULT 1,
-			folders TEXT NOT NULL DEFAULT 'INBOX',
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-		);
-
-		CREATE TABLE account_encryption (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			yubikey_slot_id TEXT NOT NULL,
-			slot_fingerprint TEXT NOT NULL,
-			encrypted_content_key_prefix TEXT,
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			UNIQUE(account_id)
-		);
-
-		CREATE TABLE sync_runs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			started_at TEXT NOT NULL,
-			finished_at TEXT,
-			emails_backed_up INTEGER NOT NULL DEFAULT 0,
-			errors TEXT,
-			status TEXT NOT NULL DEFAULT 'running',
-			last_uid INTEGER,
-			created_at TEXT NOT NULL DEFAULT (datetime('now'))
-		);
-
-		CREATE INDEX idx_sync_runs_account ON sync_runs(account_id, started_at DESC);
-	`)
-	return err
+	goose.SetBaseFS(migrations.FS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return err
+	}
+	return goose.Up(db, ".")
 }
 
 func TestCreateAccount(t *testing.T) {
@@ -264,6 +235,26 @@ func TestDeleteAccount(t *testing.T) {
 	}
 	if len(accounts) != 0 {
 		t.Errorf("expected 0 accounts after delete, got %d", len(accounts))
+	}
+
+	// The row survives (so its archived mail keeps its index), with the
+	// stored password wiped.
+	ids, err := store.ListAllAccountIDs(ctx)
+	if err != nil || len(ids) != 1 || ids[0] != created.ID {
+		t.Fatalf("ListAllAccountIDs = %v, %v; want [%d]", ids, err, created.ID)
+	}
+	var pw string
+	var deletedAt sql.NullString
+	if err := store.db.QueryRow("SELECT encrypted_password, deleted_at FROM accounts WHERE id = ?", created.ID).Scan(&pw, &deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if pw != "" || !deletedAt.Valid {
+		t.Errorf("after delete: password=%q deleted_at=%v; want wiped and set", pw, deletedAt)
+	}
+
+	// Updating a deleted account is refused.
+	if _, err := store.UpdateAccount(ctx, created.ID, "x", "h", 993, "u", "p", true, nil); err == nil {
+		t.Error("expected UpdateAccount on a deleted account to fail")
 	}
 }
 
