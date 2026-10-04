@@ -26,6 +26,9 @@ const (
 	minUIKeyLen    = 8
 	loginFailDelay = 500 * time.Millisecond
 	uiKeySetting   = "ui_key_hash"
+	// maxConcurrentHashes caps simultaneous PBKDF2 verifications so a flood of
+	// login attempts can't occupy every core.
+	maxConcurrentHashes = 2
 )
 
 // UIAuth guards the web UI behind an access key. The key comes from
@@ -34,9 +37,14 @@ const (
 // in memory (a restart logs everyone out) and carried in an HttpOnly,
 // SameSite=Lax cookie — which also stops cross-site request forgery against the
 // state-changing POST routes, since cross-site POSTs never carry the cookie.
+//
+// Login attempts are rate-limited per client address (see loginLimiter), and
+// at most maxConcurrentHashes PBKDF2 checks run at once.
 type UIAuth struct {
-	db     *sql.DB
-	envKey string
+	db      *sql.DB
+	envKey  string
+	limiter *loginLimiter
+	hashSem chan struct{}
 
 	mu       sync.Mutex
 	sessions map[string]time.Time // token → expiry
@@ -46,6 +54,8 @@ func NewUIAuth(db *sql.DB, envKey string) *UIAuth {
 	return &UIAuth{
 		db:       db,
 		envKey:   envKey,
+		limiter:  newLoginLimiter(),
+		hashSem:  make(chan struct{}, maxConcurrentHashes),
 		sessions: make(map[string]time.Time),
 	}
 }
@@ -85,6 +95,15 @@ func (a *UIAuth) loginForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *UIAuth) login(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if wait, ok := a.limiter.allow(ip); !ok {
+		slog.Warn("ui auth: login attempt while locked out", "remote", r.RemoteAddr)
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		a.renderLoginStatus(w, r, http.StatusTooManyRequests,
+			fmt.Sprintf("Too many failed attempts. Try again in %d minutes.", int(wait.Minutes())+1))
+		return
+	}
+
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -103,6 +122,7 @@ func (a *UIAuth) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		a.limiter.fail(ip)
 		// Flat delay keeps online guessing slow; the compare itself is
 		// constant-time.
 		time.Sleep(loginFailDelay)
@@ -111,6 +131,7 @@ func (a *UIAuth) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.limiter.success(ip)
 	a.issueSession(w)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -180,6 +201,10 @@ func (a *UIAuth) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *UIAuth) renderLogin(w http.ResponseWriter, r *http.Request, errMsg string) {
+	a.renderLoginStatus(w, r, http.StatusOK, errMsg)
+}
+
+func (a *UIAuth) renderLoginStatus(w http.ResponseWriter, r *http.Request, code int, errMsg string) {
 	configured, err := a.keyConfigured(r.Context())
 	if err != nil {
 		slog.Error("ui auth: settings lookup failed", "error", err)
@@ -187,6 +212,7 @@ func (a *UIAuth) renderLogin(w http.ResponseWriter, r *http.Request, errMsg stri
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
 	data := loginView.PageData{Setup: !configured, Error: errMsg}
 	if err := loginView.LoginPage(data).Render(r.Context(), w); err != nil {
 		slog.Error("ui auth: failed to render login page", "error", err)
@@ -227,6 +253,12 @@ func (a *UIAuth) verify(ctx context.Context, key string) (bool, error) {
 	hash, found, err := a.storedHash(ctx)
 	if err != nil || !found {
 		return false, err
+	}
+	select {
+	case a.hashSem <- struct{}{}:
+		defer func() { <-a.hashSem }()
+	case <-ctx.Done():
+		return false, ctx.Err()
 	}
 	return verifyUIKey(hash, key), nil
 }

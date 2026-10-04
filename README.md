@@ -219,6 +219,9 @@ sqlc-generated code lives in `internal/database/` — don't hand-edit it.
 - The web UI requires an access key (`KATCHUP_UI_KEY`, or created on first
   visit). The session cookie is `HttpOnly` + `SameSite=Lax`, which also blocks
   cross-site request forgery against the state-changing routes.
+- Login is rate-limited: 5 wrong keys within 15 minutes lock that client
+  address out for 15 minutes. The limit keys on the TCP peer address, so behind
+  a reverse proxy it applies to all clients of the proxy together.
 - The `/api/*` surface is token-guarded (Bearer header only) and fails closed.
   The token also grants **read access to decrypted mail** via the MCP
   `get_message` tool — treat it like the UI key, and only point LLMs you trust
