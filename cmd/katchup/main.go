@@ -264,9 +264,16 @@ func main() {
 	uiAuth := api.NewUIAuth(db, cfg.UIKey)
 	uiAuth.RegisterRoutes(mux)
 
+	// Bound how long a client may take to send a request, and how long an
+	// idle keep-alive connection is held, so slow or stalled clients can't pin
+	// connections. No WriteTimeout: .eml downloads and MCP responses can be
+	// large on a slow link.
 	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: uiAuth.Middleware(mux),
+		Addr:              cfg.Listen,
+		Handler:           uiAuth.Middleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	go func() {

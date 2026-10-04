@@ -269,3 +269,23 @@ func TestAPIAuth_401WithWrongOrAbsentToken(t *testing.T) {
 		})
 	}
 }
+
+func TestArchived_BatchLookupLimits(t *testing.T) {
+	h, _, _ := newTestArchivedHandler(t)
+
+	ids := make([]string, maxLookupIDs+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("<%d@example.com>", i)
+	}
+	tooMany, _ := json.Marshal(map[string][]string{"message_ids": ids})
+	huge := `{"message_ids":["` + strings.Repeat("x", maxLookupBody) + `"]}`
+
+	for name, body := range map[string]string{"too many ids": string(tooMany), "oversized body": huge} {
+		req := httptest.NewRequest(http.MethodPost, "/api/archived/lookup", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.Lookup(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: got %d, want 413", name, w.Code)
+		}
+	}
+}

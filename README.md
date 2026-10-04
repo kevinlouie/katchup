@@ -147,7 +147,7 @@ not accepted — URLs end up in logs). If `KATCHUP_API_TOKEN` is unset, every
 | Endpoint | Description |
 |---|---|
 | `GET /api/archived?message_id=<id>[&fp=<fuzzy_fp>]` | Is this message archived? Returns `{archived, archived_at, id, sha256}` |
-| `POST /api/archived/lookup` `{message_ids:[…]}` | Batch archived-status lookup |
+| `POST /api/archived/lookup` `{message_ids:[…]}` | Batch archived-status lookup (up to 1000 ids, 1 MiB body) |
 | `POST /api/sync?account=<id>` | Trigger a sync. Returns **202** with a run id; runs async, coalesces onto a recent/in-flight run |
 | `POST /api/mcp` | MCP server for agents — see below |
 

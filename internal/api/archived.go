@@ -3,6 +3,8 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -29,6 +31,12 @@ type ArchivedStatus struct {
 	ID         int64  `json:"id,omitempty"`
 	Sha256     string `json:"sha256,omitempty"`
 }
+
+const (
+	// maxLookupBody and maxLookupIDs bound one batch lookup.
+	maxLookupBody = 1 << 20
+	maxLookupIDs  = 1000
+)
 
 // batchLookupRequest is the POST /api/archived/lookup body.
 type batchLookupRequest struct {
@@ -63,9 +71,18 @@ func (h *ArchivedHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 	var req batchLookupRequest
 	// Lenient decode: caller payloads may carry extra fields we don't model —
 	// ignore them rather than 400 the whole batch.
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLookupBody))
 	if err := dec.Decode(&req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if len(req.MessageIDs) > maxLookupIDs {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("at most %d message_ids per request", maxLookupIDs))
 		return
 	}
 
