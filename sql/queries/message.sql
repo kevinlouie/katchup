@@ -121,3 +121,14 @@ LIMIT 1;
 -- can skip them before downloading any body.
 SELECT uid FROM messages
 WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid > ?4;
+
+-- name: CountBlobsByFormat :one
+-- How many archived blobs are encrypted (.eml.enc) vs plaintext (.eml); used
+-- at startup to spot a KATCHUP_MASTER_KEY that doesn't match the data.
+SELECT
+    CAST(COALESCE(SUM(path LIKE '%.enc'), 0) AS INTEGER) AS encrypted,
+    CAST(COALESCE(SUM(path NOT LIKE '%.enc'), 0) AS INTEGER) AS plaintext
+FROM blobs;
+
+-- name: LatestEncryptedBlobPath :one
+SELECT path FROM blobs WHERE path LIKE '%.enc' ORDER BY id DESC LIMIT 1;

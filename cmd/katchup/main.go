@@ -96,6 +96,19 @@ func main() {
 	syncer.ThrottleCooldown = cfg.ThrottleCooldown
 	syncer.FetchPacing = cfg.FetchPacing
 
+	// Adding, removing, or changing KATCHUP_MASTER_KEY after data exists
+	// leaves stored passwords and blobs unreadable. Say so loudly at startup
+	// rather than as a trail of sync/decrypt failures.
+	if problems, err := syncer.CheckMasterKey(ctx); err != nil {
+		slog.Warn("master key consistency check failed", "error", err)
+	} else if len(problems) > 0 {
+		slog.Error("KATCHUP_MASTER_KEY does not match the existing data — restore the key this archive was written with",
+			"problems", len(problems))
+		for _, p := range problems {
+			slog.Error("master key mismatch: " + p)
+		}
+	}
+
 	// Header-only search backend (S10). When MEILI_URL is set, messages are
 	// indexed on store and /search queries Meilisearch; otherwise search degrades
 	// to a SQLite LIKE over subject/from (no hard dependency). Only headers are
@@ -120,10 +133,6 @@ func main() {
 	// backend is wired so it also repopulates Meilisearch.
 	if len(os.Args) > 1 && os.Args[1] == "backfill" {
 		slog.Info("running local backfill from disk (no IMAP)")
-		if keyWrapper == nil {
-			slog.Error("backfill requires KATCHUP_MASTER_KEY to decrypt on-disk files")
-			os.Exit(1)
-		}
 		if err := syncer.Backfill(ctx); err != nil {
 			slog.Error("backfill failed", "error", err)
 			os.Exit(1)

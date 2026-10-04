@@ -94,6 +94,14 @@ ownership.)
 > the key that unwraps every message and every stored IMAP password. **Lose it
 > and every `.eml.enc` file is permanently unrecoverable.** It is not stored in
 > the database.
+>
+> ⚠️ **Decide on `KATCHUP_MASTER_KEY` before the first sync, and never change,
+> add, or remove it afterwards.** Stored IMAP passwords and encrypted mail are
+> only readable with the key they were written with; there is no re-encryption
+> command. katchup checks this at startup and logs `master key mismatch`
+> errors if the key doesn't match the existing data — restore the original
+> key. (Mail archived as plaintext before a key was added stays readable; the
+> accounts need their passwords re-entered.)
 
 ## Configuration
 

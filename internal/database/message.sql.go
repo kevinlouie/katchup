@@ -30,6 +30,27 @@ func (q *Queries) AdoptUIDValidity(ctx context.Context, arg AdoptUIDValidityPara
 	return err
 }
 
+const countBlobsByFormat = `-- name: CountBlobsByFormat :one
+SELECT
+    CAST(COALESCE(SUM(path LIKE '%.enc'), 0) AS INTEGER) AS encrypted,
+    CAST(COALESCE(SUM(path NOT LIKE '%.enc'), 0) AS INTEGER) AS plaintext
+FROM blobs
+`
+
+type CountBlobsByFormatRow struct {
+	Encrypted int64 `json:"encrypted"`
+	Plaintext int64 `json:"plaintext"`
+}
+
+// How many archived blobs are encrypted (.eml.enc) vs plaintext (.eml); used
+// at startup to spot a KATCHUP_MASTER_KEY that doesn't match the data.
+func (q *Queries) CountBlobsByFormat(ctx context.Context) (CountBlobsByFormatRow, error) {
+	row := q.db.QueryRowContext(ctx, countBlobsByFormat)
+	var i CountBlobsByFormatRow
+	err := row.Scan(&i.Encrypted, &i.Plaintext)
+	return i, err
+}
+
 const countMessages = `-- name: CountMessages :one
 SELECT COUNT(*) FROM messages m
 WHERE (?1 = 0 OR m.account_id = ?1)
@@ -288,6 +309,17 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 		arg.Uidvalidity,
 	)
 	return err
+}
+
+const latestEncryptedBlobPath = `-- name: LatestEncryptedBlobPath :one
+SELECT path FROM blobs WHERE path LIKE '%.enc' ORDER BY id DESC LIMIT 1
+`
+
+func (q *Queries) LatestEncryptedBlobPath(ctx context.Context) (string, error) {
+	row := q.db.QueryRowContext(ctx, latestEncryptedBlobPath)
+	var path string
+	err := row.Scan(&path)
+	return path, err
 }
 
 const listIndexedUIDs = `-- name: ListIndexedUIDs :many

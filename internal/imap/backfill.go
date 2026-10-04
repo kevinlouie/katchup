@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"katchup/internal/crypto"
 	"katchup/internal/search"
 )
 
@@ -33,11 +32,12 @@ import (
 // incremental (pulls only genuinely-new mail) rather than a full re-download —
 // or, if the server has renumbered the folder since, a clean re-scan.
 //
-// Requires a key wrapper: the on-disk files are encrypted and must be decrypted
-// to compute the content hash and read the header fields.
+// Encrypted (.eml.enc) files need the key wrapper to be decrypted, to compute
+// the content hash and read the header fields; without one they are skipped
+// (and counted as failed). Plaintext (.eml) files are read as-is.
 func (s *Syncer) Backfill(ctx context.Context) error {
 	if s.keyWrapper == nil {
-		return fmt.Errorf("backfill requires a master key to decrypt on-disk files")
+		s.logger.Warn("backfill: no master key — encrypted (.eml.enc) files will be skipped")
 	}
 
 	// Only backfill accounts that still have a row (FK on blobs/messages).
@@ -116,7 +116,7 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 			return nil
 		}
 
-		raw, derr := crypto.DecryptFile(path, s.keyWrapper)
+		raw, derr := ReadMessageBlob(s.dataDir, rel, s.keyWrapper)
 		if derr != nil {
 			s.logger.Warn("backfill: decrypt failed, skipping", "file", rel, "error", derr)
 			failed++
