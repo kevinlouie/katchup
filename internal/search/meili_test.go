@@ -63,3 +63,30 @@ func TestMeiliIndexAddsDateTS(t *testing.T) {
 		t.Errorf("indexed docs = %v", docs)
 	}
 }
+
+// TestMeiliSearchSetsUpMissingIndex: a search that fails because the filter
+// settings are missing (Meili was down at startup or lost its data) configures
+// the index and retries.
+func TestMeiliSearchSetsUpMissingIndex(t *testing.T) {
+	configured := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/indexes/messages/settings":
+			configured = true
+			w.Write([]byte(`{}`))
+		case r.URL.Path == "/indexes/messages/search" && !configured:
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"code":"invalid_search_filter"}`))
+		default:
+			w.Write([]byte(`{"hits":[]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := NewMeili(srv.URL, "key").Search(context.Background(), Query{Text: "x", AccountID: 1}); err != nil {
+		t.Fatalf("search after index setup: %v", err)
+	}
+	if !configured {
+		t.Fatal("index settings were not applied")
+	}
+}

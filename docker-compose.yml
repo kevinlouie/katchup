@@ -28,7 +28,10 @@ services:
       - MEILI_URL=http://meilisearch:7700
       - MEILI_KEY=${MEILI_MASTER_KEY}
     depends_on:
-      - meilisearch
+      # Wait for Meilisearch to be up so the index is configured at startup
+      # (katchup also retries in the background if it isn't).
+      meilisearch:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -49,8 +52,10 @@ services:
       - meili_data:/meili_data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
-      interval: 30s
+      # 127.0.0.1, not localhost: localhost resolves to ::1 in the image and
+      # Meilisearch listens on IPv4 only, so the check would never pass.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7700/health"]
+      interval: 10s
       timeout: 3s
       start_period: 5s
       retries: 3

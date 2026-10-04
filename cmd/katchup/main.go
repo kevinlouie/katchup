@@ -117,7 +117,10 @@ func main() {
 	if cfg.MeiliURL != "" {
 		meili := search.NewMeili(cfg.MeiliURL, cfg.MeiliKey)
 		if err := meili.EnsureIndex(ctx); err != nil {
-			slog.Warn("failed to initialize Meilisearch index; search falls back to DB until it recovers", "error", err)
+			// Without the index settings, filtered (account/date) searches fail
+			// and fall back to the DB — so keep trying rather than giving up.
+			slog.Warn("failed to initialize Meilisearch index; retrying in the background, search falls back to DB until then", "error", err)
+			go ensureIndexRetry(ctx, meili)
 		}
 		imapStore.SetIndexer(meili)
 		searcher = meili
@@ -299,6 +302,26 @@ func gooseUp(db *sql.DB) error {
 		return err
 	}
 	return goose.Up(db, ".")
+}
+
+// ensureIndexRetry retries Meilisearch index setup with capped exponential
+// backoff until it succeeds or ctx ends.
+func ensureIndexRetry(ctx context.Context, meili *search.Meili) {
+	delay := 5 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if err := meili.EnsureIndex(ctx); err != nil {
+			slog.Warn("Meilisearch index setup still failing", "error", err, "retry_in", delay)
+			delay = min(delay*2, 5*time.Minute)
+			continue
+		}
+		slog.Info("Meilisearch index initialized")
+		return
+	}
 }
 
 // configureLogger sets up slog with JSON handler for production or text handler for development.

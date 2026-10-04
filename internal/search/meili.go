@@ -108,6 +108,13 @@ func (m *Meili) Search(ctx context.Context, q Query) ([]Result, error) {
 		body["filter"] = strings.Join(filters, " AND ")
 	}
 	raw, err := m.do(ctx, http.MethodPost, "/indexes/"+indexName+"/search", body)
+	if err != nil && needsIndexSetup(err) {
+		// The index or its filter settings are missing — Meili was down at
+		// startup, or restarted with an empty volume. Set them up and retry once.
+		if ierr := m.EnsureIndex(ctx); ierr == nil {
+			raw, err = m.do(ctx, http.MethodPost, "/indexes/"+indexName+"/search", body)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("meili search: %w", err)
 	}
@@ -128,6 +135,13 @@ func (m *Meili) Search(ctx context.Context, q Query) ([]Result, error) {
 		})
 	}
 	return out, nil
+}
+
+// needsIndexSetup reports whether a Meili error means the index or its
+// filterable attributes haven't been configured.
+func needsIndexSetup(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "index_not_found") || strings.Contains(msg, "invalid_search_filter")
 }
 
 // do issues a JSON request to the Meili API and returns the raw response body.
