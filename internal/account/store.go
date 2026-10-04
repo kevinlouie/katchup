@@ -207,6 +207,46 @@ func (s *Store) UpsertFolderSyncState(ctx context.Context, accountID int64, fold
 	return nil
 }
 
+// SetFolderSyncState records a folder's UIDVALIDITY together with its
+// watermark. Used when the generation is first seen or changes, so the two
+// are always updated as a pair.
+func (s *Store) SetFolderSyncState(ctx context.Context, accountID int64, folder string, uidValidity, lastUID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO folder_sync_state (account_id, folder, uidvalidity, last_uid, updated_at)
+		 VALUES (?1, ?2, ?3, ?4, datetime('now'))
+		 ON CONFLICT(account_id, folder) DO UPDATE SET
+			 uidvalidity = excluded.uidvalidity,
+			 last_uid = excluded.last_uid,
+			 updated_at = datetime('now')`,
+		accountID, folder, uidValidity, lastUID)
+	if err != nil {
+		return fmt.Errorf("set folder sync state: %w", err)
+	}
+	return nil
+}
+
+// GetFolderSyncState returns the watermark and UIDVALIDITY recorded for a
+// folder. Both are 0 if no record exists; a 0 UIDVALIDITY on an existing row
+// means it predates UIDVALIDITY tracking.
+func (s *Store) GetFolderSyncState(ctx context.Context, accountID int64, folder string) (lastUID, uidValidity int64, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	err = s.db.QueryRowContext(ctx,
+		"SELECT last_uid, uidvalidity FROM folder_sync_state WHERE account_id = ?1 AND folder = ?2",
+		accountID, folder).Scan(&lastUID, &uidValidity)
+	if err == sql.ErrNoRows {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("get folder sync state: %w", err)
+	}
+	return lastUID, uidValidity, nil
+}
+
 // GetFolderLastUID returns the last synced UID for a specific (account, folder).
 // Returns 0 if no record exists.
 func (s *Store) GetFolderLastUID(ctx context.Context, accountID int64, folder string) (int64, error) {

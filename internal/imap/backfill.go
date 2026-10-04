@@ -22,14 +22,16 @@ import (
 // Backfill rebuilds the blobs + messages index (and the search index) from the
 // encrypted .eml files already on disk, WITHOUT contacting any IMAP server. It
 // exists to recover from a lost/reset database: the mail is durably stored as
-// <dataDir>/<accountID>/<folder>/<date>_<uid>.eml[.enc] files, so the index can
+// <dataDir>/<accountID>/<folder>/<date>_[<uidvalidity>_]<uid>.eml[.enc] files, so the index can
 // be regenerated locally instead of re-downloading everything (which burns the
 // provider's daily bandwidth cap — e.g. Gmail throttles at ~2.5GB/day).
 //
 // It is idempotent and resumable: a message already indexed for
-// (account, folder, uid) is skipped. After indexing a folder it sets the folder
-// watermark to the highest UID found, so the NEXT real IMAP sync is incremental
-// (pulls only genuinely-new mail) rather than a full re-download.
+// (account, folder, uidvalidity, uid) is skipped. After indexing a folder it
+// sets the folder watermark to the highest UID of its newest UIDVALIDITY
+// generation (UIDVALIDITY only ever increases), so the NEXT real IMAP sync is
+// incremental (pulls only genuinely-new mail) rather than a full re-download —
+// or, if the server has renumbered the folder since, a clean re-scan.
 //
 // Requires a key wrapper: the on-disk files are encrypted and must be decrypted
 // to compute the content hash and read the header fields.
@@ -48,10 +50,12 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 		known[a.ID] = true
 	}
 
-	// Highest UID seen per (account, folder), used to set the resume watermark.
+	// Highest UID seen per (account, folder, uidvalidity), used to set the
+	// resume watermark.
 	type fkey struct {
-		account int64
-		folder  string
+		account     int64
+		folder      string
+		uidValidity int64
 	}
 	maxUID := make(map[fkey]int64)
 	warnedMissing := make(map[int64]bool)
@@ -77,7 +81,7 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 		if rerr != nil {
 			return nil
 		}
-		// <accountID>/<folder...>/<date>_<uid>.eml[.enc]
+		// <accountID>/<folder...>/<date>_[<uidvalidity>_]<uid>.eml[.enc]
 		parts := strings.Split(rel, string(filepath.Separator))
 		if len(parts) < 3 {
 			return nil // not an account/folder/file layout
@@ -96,17 +100,18 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 		// Folder may itself contain separators (e.g. "[Gmail]/All Mail").
 		folder := strings.Join(parts[1:len(parts)-1], "/")
 
-		uid, ok := parseUIDFromName(name)
+		uidValidity, uid, ok := parseUIDsFromName(name)
 		if !ok {
 			s.logger.Warn("backfill: cannot parse UID from filename", "file", rel)
 			return nil
 		}
+		key := fkey{accountID, folder, uidValidity}
 
 		// Idempotent + resumable: already indexed → just track the watermark.
-		if exists, eerr := s.store.MessageExists(ctx, accountID, folder, uid); eerr == nil && exists {
+		if exists, eerr := s.store.MessageExists(ctx, accountID, folder, uidValidity, uid); eerr == nil && exists {
 			skipped++
-			if uid > maxUID[fkey{accountID, folder}] {
-				maxUID[fkey{accountID, folder}] = uid
+			if uid > maxUID[key] {
+				maxUID[key] = uid
 			}
 			return nil
 		}
@@ -139,6 +144,7 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 		if ierr := s.store.InsertAndIndexMessage(ctx, InsertMessageParams{
 			AccountID:    accountID,
 			Folder:       folder,
+			UIDValidity:  uidValidity,
 			UID:          uid,
 			BlobID:       blobID,
 			MessageIDHdr: messageID(raw),
@@ -154,8 +160,8 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 			return nil
 		}
 
-		if uid > maxUID[fkey{accountID, folder}] {
-			maxUID[fkey{accountID, folder}] = uid
+		if uid > maxUID[key] {
+			maxUID[key] = uid
 		}
 		indexed++
 		if indexed%1000 == 0 {
@@ -167,12 +173,26 @@ func (s *Syncer) Backfill(ctx context.Context) error {
 		return fmt.Errorf("walk data dir: %w", walkErr)
 	}
 
-	// Advance each folder's watermark so the next IMAP sync is incremental.
-	for k, uid := range maxUID {
-		if err := s.store.accountSt.UpsertFolderSyncState(ctx, k.account, k.folder, uid); err != nil {
+	// Advance each folder's watermark so the next IMAP sync is incremental. Only
+	// the newest generation's UIDs mean anything to the server; if that is the
+	// legacy 0, the next sync adopts the server's UIDVALIDITY.
+	type folderKey struct {
+		account int64
+		folder  string
+	}
+	newest := make(map[folderKey]fkey)
+	for k := range maxUID {
+		fk := folderKey{k.account, k.folder}
+		if cur, ok := newest[fk]; !ok || k.uidValidity > cur.uidValidity {
+			newest[fk] = k
+		}
+	}
+	for _, k := range newest {
+		uid := maxUID[k]
+		if err := s.store.accountSt.SetFolderSyncState(ctx, k.account, k.folder, k.uidValidity, uid); err != nil {
 			s.logger.Warn("backfill: failed to set folder watermark", "account_id", k.account, "folder", k.folder, "error", err)
 		} else {
-			s.logger.Info("backfill: watermark set", "account_id", k.account, "folder", k.folder, "last_uid", uid)
+			s.logger.Info("backfill: watermark set", "account_id", k.account, "folder", k.folder, "uidvalidity", k.uidValidity, "last_uid", uid)
 		}
 	}
 
@@ -232,19 +252,26 @@ func (s *Store) ReindexAll(ctx context.Context) (int, error) {
 	return indexed, nil
 }
 
-// parseUIDFromName extracts the UID from "<date>_<uid>.eml[.enc]". The date part
-// contains '-' but no '_', so the UID is the trailing number after the last '_'.
-func parseUIDFromName(name string) (int64, bool) {
+// parseUIDsFromName extracts the UIDVALIDITY and UID from
+// "<date>_<uidvalidity>_<uid>.eml[.enc]", or from the legacy "<date>_<uid>"
+// form (UIDVALIDITY 0 = unknown). The date part contains '-' but no '_'.
+func parseUIDsFromName(name string) (uidValidity, uid int64, ok bool) {
 	base := strings.TrimSuffix(strings.TrimSuffix(name, ".enc"), ".eml")
-	i := strings.LastIndex(base, "_")
-	if i < 0 {
-		return 0, false
+	parts := strings.Split(base, "_")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, 0, false
 	}
-	uid, err := strconv.ParseInt(base[i+1:], 10, 64)
+	uid, err := strconv.ParseInt(parts[len(parts)-1], 10, 64)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return uid, true
+	if len(parts) == 3 {
+		uidValidity, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+	}
+	return uidValidity, uid, true
 }
 
 // parseHeaders reads the indexed header fields from a raw RFC822 message. From/To
@@ -300,7 +327,7 @@ func decodeMIME(s string) string {
 	return s
 }
 
-// dateFromName pulls the YYYY-MM-DD prefix from "<date>_<uid>.eml[.enc]" and
+// dateFromName pulls the YYYY-MM-DD prefix from "<date>_...eml[.enc]" and
 // returns it as an RFC3339 timestamp at UTC midnight.
 func dateFromName(name string) string {
 	if i := strings.Index(name, "_"); i >= 10 {

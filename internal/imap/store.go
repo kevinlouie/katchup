@@ -73,8 +73,11 @@ type Message struct {
 
 // InsertMessageParams carries the fields for one messages row.
 type InsertMessageParams struct {
-	AccountID    int64
-	Folder       string
+	AccountID int64
+	Folder    string
+	// UIDValidity is the folder's UIDVALIDITY when the message was fetched (0 =
+	// unknown, e.g. backfilled from a legacy file name).
+	UIDValidity  int64
 	UID          int64
 	BlobID       int64
 	MessageIDHdr string
@@ -126,12 +129,13 @@ func (s *Store) UpsertBlob(ctx context.Context, accountID int64, sha, path strin
 }
 
 // MessageExists reports whether a messages row already exists for
-// (account, folder, uid). Used to make the sync path idempotent.
-func (s *Store) MessageExists(ctx context.Context, accountID int64, folder string, uid int64) (bool, error) {
+// (account, folder, uidvalidity, uid). Used to make the sync path idempotent.
+func (s *Store) MessageExists(ctx context.Context, accountID int64, folder string, uidValidity, uid int64) (bool, error) {
 	n, err := s.queries.ExistsMessage(ctx, database.ExistsMessageParams{
-		AccountID: accountID,
-		Folder:    folder,
-		Uid:       uid,
+		AccountID:   accountID,
+		Folder:      folder,
+		Uidvalidity: uidValidity,
+		Uid:         uid,
 	})
 	if err != nil {
 		return false, fmt.Errorf("exists message: %w", err)
@@ -139,11 +143,13 @@ func (s *Store) MessageExists(ctx context.Context, accountID int64, folder strin
 	return n > 0, nil
 }
 
-// InsertMessage inserts a messages row (no-op on (account, folder, uid) conflict).
+// InsertMessage inserts a messages row (no-op on (account, folder, uidvalidity,
+// uid) conflict).
 func (s *Store) InsertMessage(ctx context.Context, p InsertMessageParams) error {
 	if err := s.queries.InsertMessage(ctx, database.InsertMessageParams{
 		AccountID:    p.AccountID,
 		Folder:       p.Folder,
+		Uidvalidity:  p.UIDValidity,
 		Uid:          p.UID,
 		BlobID:       p.BlobID,
 		MessageIDHdr: nullStr(p.MessageIDHdr),
@@ -159,7 +165,8 @@ func (s *Store) InsertMessage(ctx context.Context, p InsertMessageParams) error 
 	return nil
 }
 
-// InsertAndIndexMessage inserts a messages row (idempotent per account/folder/uid)
+// InsertAndIndexMessage inserts a messages row (idempotent per account/folder/
+// uidvalidity/uid)
 // and then pushes a HEADER-ONLY doc to the search backend. Indexing is best-effort:
 // a search-backend failure is logged and swallowed so it never fails the sync (the
 // message is already durably stored). Only header fields are indexed — never the
@@ -172,9 +179,10 @@ func (s *Store) InsertAndIndexMessage(ctx context.Context, p InsertMessageParams
 		return nil // search disabled — skip the id lookup entirely
 	}
 	id, err := s.queries.GetMessageIDByUID(ctx, database.GetMessageIDByUIDParams{
-		AccountID: p.AccountID,
-		Folder:    p.Folder,
-		Uid:       p.UID,
+		AccountID:   p.AccountID,
+		Folder:      p.Folder,
+		Uidvalidity: p.UIDValidity,
+		Uid:         p.UID,
 	})
 	if err != nil {
 		slog.Warn("search index skipped: could not resolve message id", "account_id", p.AccountID, "folder", p.Folder, "uid", p.UID, "error", err)
@@ -401,6 +409,19 @@ func (s *Store) GetLastSyncState(ctx context.Context, accountID int64) (lastUID 
 // history. Re-fetches are deduplicated by the on-disk .eml files.
 func (s *Store) GetLastSyncStateForFolder(ctx context.Context, accountID int64, folder string) (int64, error) {
 	return s.accountSt.GetFolderLastUID(ctx, accountID, folder)
+}
+
+// AdoptUIDValidity stamps a folder's messages recorded before UIDVALIDITY was
+// tracked (uidvalidity = 0) with the server's current value.
+func (s *Store) AdoptUIDValidity(ctx context.Context, accountID int64, folder string, uidValidity int64) error {
+	if err := s.queries.AdoptUIDValidity(ctx, database.AdoptUIDValidityParams{
+		Uidvalidity: uidValidity,
+		AccountID:   accountID,
+		Folder:      folder,
+	}); err != nil {
+		return fmt.Errorf("adopt uidvalidity: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetCurrentSyncRun(ctx context.Context, accountID int64) (*account.SyncRun, error) {

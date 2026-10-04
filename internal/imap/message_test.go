@@ -7,82 +7,37 @@ import (
 	"testing"
 
 	"katchup/internal/account"
+	migrations "katchup/sql/migrations"
 
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
-const testSchema = `
-CREATE TABLE accounts (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	name TEXT NOT NULL,
-	host TEXT NOT NULL,
-	port INTEGER NOT NULL DEFAULT 993,
-	username TEXT NOT NULL,
-	encrypted_password TEXT NOT NULL,
-	use_ssl INTEGER NOT NULL DEFAULT 1,
-	folders TEXT NOT NULL DEFAULT 'INBOX',
-	created_at TEXT NOT NULL DEFAULT (datetime('now')),
-	updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE blobs (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-	sha256 TEXT NOT NULL,
-	path TEXT NOT NULL,
-	size INTEGER NOT NULL,
-	refcount INTEGER NOT NULL DEFAULT 1,
-	created_at TEXT NOT NULL DEFAULT (datetime('now')),
-	UNIQUE(account_id, sha256)
-);
-CREATE TABLE messages (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-	folder TEXT NOT NULL,
-	uid INTEGER NOT NULL,
-	blob_id INTEGER NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,
-	message_id_hdr TEXT,
-	fuzzy_fp TEXT,
-	from_addr TEXT,
-	to_addr TEXT,
-	subject TEXT,
-	internal_date TEXT,
-	size INTEGER NOT NULL DEFAULT 0,
-	created_at TEXT NOT NULL DEFAULT (datetime('now')),
-	UNIQUE(account_id, folder, uid)
-);
-CREATE TABLE sync_runs (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-	started_at TEXT NOT NULL,
-	finished_at TEXT,
-	emails_backed_up INTEGER NOT NULL DEFAULT 0,
-	errors TEXT,
-	status TEXT NOT NULL DEFAULT 'running',
-	last_uid INTEGER,
-	created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE folder_sync_state (
-	account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-	folder TEXT NOT NULL,
-	last_uid INTEGER NOT NULL DEFAULT 0,
-	updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-	PRIMARY KEY (account_id, folder)
-);
-`
+// migrateTestDB applies the real (embedded) migrations so tests exercise the
+// production schema rather than a hand-maintained copy.
+func migrateTestDB(t *testing.T, db *sql.DB) {
+	t.Helper()
+	goose.SetBaseFS(migrations.FS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.Up(db, "."); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+}
 
 func newTestStore(t *testing.T) (*Store, int64) {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if _, err := db.Exec(testSchema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
+	migrateTestDB(t, db)
 
 	acctStore, err := account.New(db, "")
 	if err != nil {
@@ -204,12 +159,12 @@ func TestMessageExistsIdempotent(t *testing.T) {
 		t.Fatalf("insert message: %v", err)
 	}
 
-	exists, err := store.MessageExists(ctx, accountID, "INBOX", 5)
+	exists, err := store.MessageExists(ctx, accountID, "INBOX", 0, 5)
 	if err != nil || !exists {
 		t.Fatalf("expected message to exist, got exists=%v err=%v", exists, err)
 	}
 
-	missing, err := store.MessageExists(ctx, accountID, "INBOX", 6)
+	missing, err := store.MessageExists(ctx, accountID, "INBOX", 0, 6)
 	if err != nil || missing {
 		t.Fatalf("expected no message, got exists=%v err=%v", missing, err)
 	}

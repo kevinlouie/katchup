@@ -42,8 +42,14 @@ touches the live account.
 ```
 data/
 ├── katchup.db                                  # SQLite (metadata + message index)
-└── <account_id>/<folder>/<YYYY-MM-DD>_<uid>.eml.enc   # encrypted message blobs
+└── <account_id>/<folder>/<YYYY-MM-DD>_<uidvalidity>_<uid>.eml.enc   # encrypted message blobs
 ```
+
+UIDs are tracked together with each folder's `UIDVALIDITY`. If the server
+renumbers a folder (a migration or restore on the provider side), katchup
+notices, keeps everything already archived, and re-scans that folder from the
+start — re-downloading it, but storing only content it doesn't already have.
+Files written before UIDVALIDITY tracking are named `<YYYY-MM-DD>_<uid>.eml.enc`.
 
 ## Quick start (Docker)
 

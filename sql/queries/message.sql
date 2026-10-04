@@ -13,18 +13,26 @@ FROM blobs
 WHERE account_id = ?1 AND sha256 = ?2;
 
 -- name: InsertMessage :exec
--- Idempotent per (account, folder, uid): re-processing the same message (e.g.
--- an aborted batch retried next run) does not create a duplicate row.
+-- Idempotent per (account, folder, uidvalidity, uid): re-processing the same
+-- message (e.g. an aborted batch retried next run) does not create a duplicate row.
 INSERT INTO messages (
     account_id, folder, uid, blob_id, message_id_hdr, fuzzy_fp,
-    from_addr, to_addr, subject, internal_date, size
+    from_addr, to_addr, subject, internal_date, size, uidvalidity
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-ON CONFLICT(account_id, folder, uid) DO NOTHING;
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+ON CONFLICT(account_id, folder, uidvalidity, uid) DO NOTHING;
 
 -- name: ExistsMessage :one
 SELECT COUNT(*) FROM messages
-WHERE account_id = ?1 AND folder = ?2 AND uid = ?3;
+WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid = ?4;
+
+-- name: AdoptUIDValidity :exec
+-- Stamp a folder's pre-UIDVALIDITY-tracking rows (uidvalidity = 0) with the
+-- server's current value the first time it is seen, so they keep matching
+-- ExistsMessage. OR IGNORE skips a row that would collide with one already
+-- recorded under that generation.
+UPDATE OR IGNORE messages SET uidvalidity = ?1
+WHERE account_id = ?2 AND folder = ?3 AND uidvalidity = 0;
 
 -- name: ListMessages :many
 -- internal_date is RFC3339 UTC, so @since (inclusive) / @before (exclusive) are
@@ -65,10 +73,10 @@ JOIN blobs b ON b.id = m.blob_id
 WHERE m.id = ?1;
 
 -- name: GetMessageIDByUID :one
--- Resolve the messages.id for a (account, folder, uid) triple. Used after an
--- idempotent InsertMessage to obtain the row id for header-only search indexing.
+-- Resolve the messages.id for a (account, folder, uidvalidity, uid) key. Used
+-- after an idempotent InsertMessage to obtain the row id for search indexing.
 SELECT id FROM messages
-WHERE account_id = ?1 AND folder = ?2 AND uid = ?3;
+WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid = ?4;
 
 -- name: SearchMessagesLike :many
 -- SQLite LIKE fallback for header-only search when Meilisearch is unconfigured.

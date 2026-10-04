@@ -42,8 +42,8 @@ func TestBackfillIndexesFromDisk(t *testing.T) {
 	ctx := context.Background()
 
 	// Write two encrypted fixtures the way sync would: same account/folder, two UIDs.
-	rel1 := s.relEmlPath(accountID, "INBOX", "2013-10-14", 6608)
-	rel2 := s.relEmlPath(accountID, "INBOX", "2013-10-22", 6742)
+	rel1 := s.relEmlPath(accountID, "INBOX", "2013-10-14", 0, 6608)
+	rel2 := s.relEmlPath(accountID, "INBOX", "2013-10-22", 0, 6742)
 	for _, rel := range []string{rel1, rel2} {
 		if err := s.writeEML(filepath.Join(dataDir, rel), []byte(sampleEML)); err != nil {
 			t.Fatalf("write fixture %s: %v", rel, err)

@@ -95,7 +95,7 @@ func TestInsertAndIndexMessageNoopByDefault(t *testing.T) {
 		t.Fatalf("insert and index (noop): %v", err)
 	}
 
-	exists, err := store.MessageExists(ctx, accountID, "INBOX", 100)
+	exists, err := store.MessageExists(ctx, accountID, "INBOX", 0, 100)
 	if err != nil || !exists {
 		t.Fatalf("expected message stored despite no indexer, exists=%v err=%v", exists, err)
 	}

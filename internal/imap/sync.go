@@ -483,16 +483,20 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	defer c.Logout()
 
 	// Select the folder
-	_, err = c.Select(folder, false)
+	mbox, err := c.Select(folder, false)
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("folder %s: select: %v", folder, err))
 		return 0, 0, errs
 	}
+	uidValidity := int64(mbox.UidValidity)
 
-	// Get last sync state for this specific folder.
-	// For SSL accounts we use the account-level last UID; for STARTTLS
-	// (which may have different folders), we use folder-level tracking.
-	lastSyncUID, _ := s.store.GetLastSyncStateForFolder(ctx, acct.ID, folder)
+	// Resume from this folder's watermark — unless the server renumbered the
+	// folder since it was recorded, in which case start over.
+	lastSyncUID, err := s.reconcileUIDValidity(ctx, acct.ID, folder, uidValidity)
+	if err != nil {
+		errs = append(errs, fmt.Sprintf("folder %s: sync state: %v", folder, err))
+		return 0, 0, errs
+	}
 
 	// Build UID search criteria — sync by UID range only, never UNSEEN.
 	var criteria imap.SearchCriteria
@@ -573,7 +577,7 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 				if !ok {
 					break drain
 				}
-				if err := s.fetchAndWriteMessage(ctx, acct, folder, msg.Uid, msg); err != nil {
+				if err := s.fetchAndWriteMessage(ctx, acct, folder, uidValidity, msg.Uid, msg); err != nil {
 					errMsg := fmt.Sprintf("folder %s: UID %d: %v", folder, msg.Uid, err)
 					s.logger.Error(errMsg)
 					errs = appendErr(errs, errMsg)
@@ -638,6 +642,42 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 	}
 
 	return watermark(maxSuccess, minFailed), count, errs
+}
+
+// reconcileUIDValidity compares a folder's UIDVALIDITY on the server with the
+// one recorded alongside its watermark and returns the UID to resume after:
+//   - first time seen (recorded 0): adopt it, keep the watermark, and stamp the
+//     folder's pre-tracking messages with it so they still count as archived;
+//   - unchanged: the stored watermark;
+//   - changed: the server renumbered the folder, so every recorded UID is
+//     meaningless — reset the watermark to 0 and re-scan. Archived messages are
+//     kept under their old generation; content dedup avoids rewriting blobs.
+//
+// A server reporting no UIDVALIDITY (0) leaves the old behaviour untouched.
+func (s *Syncer) reconcileUIDValidity(ctx context.Context, accountID int64, folder string, uidValidity int64) (int64, error) {
+	lastUID, stored, err := s.store.accountSt.GetFolderSyncState(ctx, accountID, folder)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case uidValidity == 0 || stored == uidValidity:
+		return lastUID, nil
+	case stored == 0:
+		if err := s.store.AdoptUIDValidity(ctx, accountID, folder, uidValidity); err != nil {
+			return 0, err
+		}
+		if err := s.store.accountSt.SetFolderSyncState(ctx, accountID, folder, uidValidity, lastUID); err != nil {
+			return 0, err
+		}
+		return lastUID, nil
+	default:
+		s.logger.Warn("folder UIDVALIDITY changed — server renumbered it, re-scanning from UID 1",
+			"account_id", accountID, "folder", folder, "old", stored, "new", uidValidity)
+		if err := s.store.accountSt.SetFolderSyncState(ctx, accountID, folder, uidValidity, 0); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
 }
 
 // appendErr appends an error message while keeping the slice bounded so a
@@ -762,11 +802,11 @@ func (s *Syncer) connectSTARTTLS(addr string, acct account.Account) (*client.Cli
 	return c, nil
 }
 
-func (s *Syncer) fetchAndWriteMessage(ctx context.Context, acct account.Account, folder string, uid uint32, msg *imap.Message) error {
+func (s *Syncer) fetchAndWriteMessage(ctx context.Context, acct account.Account, folder string, uidValidity int64, uid uint32, msg *imap.Message) error {
 	// Message-level idempotency: an aborted batch is retried next run, so a
-	// message already indexed for (account, folder, uid) must be skipped —
-	// otherwise it would bump a blob refcount a second time.
-	if exists, err := s.store.MessageExists(ctx, acct.ID, folder, int64(uid)); err == nil && exists {
+	// message already indexed for (account, folder, uidvalidity, uid) must be
+	// skipped — otherwise it would bump a blob refcount a second time.
+	if exists, err := s.store.MessageExists(ctx, acct.ID, folder, uidValidity, int64(uid)); err == nil && exists {
 		s.logger.Debug("skipping already-indexed message", "folder", folder, "uid", uid)
 		return nil
 	}
@@ -791,7 +831,7 @@ func (s *Syncer) fetchAndWriteMessage(ctx context.Context, acct account.Account,
 	size := int64(len(rawBody))
 
 	date := time.Unix(msg.InternalDate.Unix(), 0).UTC().Format("2006-01-02")
-	relPath := s.relEmlPath(acct.ID, folder, date, uid)
+	relPath := s.relEmlPath(acct.ID, folder, date, uidValidity, uid)
 
 	// If a blob with this content already exists for the account, reuse it and
 	// bump the refcount — do NOT rewrite the file. Otherwise encrypt+write the
@@ -831,6 +871,7 @@ func (s *Syncer) fetchAndWriteMessage(ctx context.Context, acct account.Account,
 	return s.store.InsertAndIndexMessage(ctx, InsertMessageParams{
 		AccountID:    acct.ID,
 		Folder:       folder,
+		UIDValidity:  uidValidity,
 		UID:          int64(uid),
 		BlobID:       blobID,
 		MessageIDHdr: msgID,
@@ -844,13 +885,20 @@ func (s *Syncer) fetchAndWriteMessage(ctx context.Context, acct account.Account,
 }
 
 // relEmlPath returns the .eml(.enc) path RELATIVE to the data dir. This is what
-// is stored in blobs.path so the file can be relocated with the data dir.
-func (s *Syncer) relEmlPath(accountID int64, folder, date string, uid uint32) string {
+// is stored in blobs.path so the file can be relocated with the data dir. The
+// name is <date>_<uidvalidity>_<uid> so a renumbered folder can never overwrite
+// an archived file; with an unknown (0) UIDVALIDITY it is the legacy
+// <date>_<uid>.
+func (s *Syncer) relEmlPath(accountID int64, folder, date string, uidValidity int64, uid uint32) string {
 	ext := ".eml"
 	if s.keyWrapper != nil {
 		ext = ".eml.enc"
 	}
-	return filepath.Join(strconv.FormatInt(accountID, 10), folder, fmt.Sprintf("%s_%d%s", date, uid, ext))
+	name := fmt.Sprintf("%s_%d%s", date, uid, ext)
+	if uidValidity != 0 {
+		name = fmt.Sprintf("%s_%d_%d%s", date, uidValidity, uid, ext)
+	}
+	return filepath.Join(strconv.FormatInt(accountID, 10), folder, name)
 }
 
 // joinAddresses renders IMAP envelope addresses as a comma-separated list of

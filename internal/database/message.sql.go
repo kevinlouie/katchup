@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const adoptUIDValidity = `-- name: AdoptUIDValidity :exec
+UPDATE OR IGNORE messages SET uidvalidity = ?1
+WHERE account_id = ?2 AND folder = ?3 AND uidvalidity = 0
+`
+
+type AdoptUIDValidityParams struct {
+	Uidvalidity int64  `json:"uidvalidity"`
+	AccountID   int64  `json:"account_id"`
+	Folder      string `json:"folder"`
+}
+
+// Stamp a folder's pre-UIDVALIDITY-tracking rows (uidvalidity = 0) with the
+// server's current value the first time it is seen, so they keep matching
+// ExistsMessage. OR IGNORE skips a row that would collide with one already
+// recorded under that generation.
+func (q *Queries) AdoptUIDValidity(ctx context.Context, arg AdoptUIDValidityParams) error {
+	_, err := q.db.ExecContext(ctx, adoptUIDValidity, arg.Uidvalidity, arg.AccountID, arg.Folder)
+	return err
+}
+
 const countMessages = `-- name: CountMessages :one
 SELECT COUNT(*) FROM messages m
 WHERE (?1 = 0 OR m.account_id = ?1)
@@ -50,17 +70,23 @@ func (q *Queries) CountMessagesByAccount(ctx context.Context, accountID int64) (
 
 const existsMessage = `-- name: ExistsMessage :one
 SELECT COUNT(*) FROM messages
-WHERE account_id = ?1 AND folder = ?2 AND uid = ?3
+WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid = ?4
 `
 
 type ExistsMessageParams struct {
-	AccountID int64  `json:"account_id"`
-	Folder    string `json:"folder"`
-	Uid       int64  `json:"uid"`
+	AccountID   int64  `json:"account_id"`
+	Folder      string `json:"folder"`
+	Uidvalidity int64  `json:"uidvalidity"`
+	Uid         int64  `json:"uid"`
 }
 
 func (q *Queries) ExistsMessage(ctx context.Context, arg ExistsMessageParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, existsMessage, arg.AccountID, arg.Folder, arg.Uid)
+	row := q.db.QueryRowContext(ctx, existsMessage,
+		arg.AccountID,
+		arg.Folder,
+		arg.Uidvalidity,
+		arg.Uid,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -144,19 +170,25 @@ func (q *Queries) GetBlobBySha(ctx context.Context, arg GetBlobByShaParams) (Blo
 
 const getMessageIDByUID = `-- name: GetMessageIDByUID :one
 SELECT id FROM messages
-WHERE account_id = ?1 AND folder = ?2 AND uid = ?3
+WHERE account_id = ?1 AND folder = ?2 AND uidvalidity = ?3 AND uid = ?4
 `
 
 type GetMessageIDByUIDParams struct {
-	AccountID int64  `json:"account_id"`
-	Folder    string `json:"folder"`
-	Uid       int64  `json:"uid"`
+	AccountID   int64  `json:"account_id"`
+	Folder      string `json:"folder"`
+	Uidvalidity int64  `json:"uidvalidity"`
+	Uid         int64  `json:"uid"`
 }
 
-// Resolve the messages.id for a (account, folder, uid) triple. Used after an
-// idempotent InsertMessage to obtain the row id for header-only search indexing.
+// Resolve the messages.id for a (account, folder, uidvalidity, uid) key. Used
+// after an idempotent InsertMessage to obtain the row id for search indexing.
 func (q *Queries) GetMessageIDByUID(ctx context.Context, arg GetMessageIDByUIDParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getMessageIDByUID, arg.AccountID, arg.Folder, arg.Uid)
+	row := q.db.QueryRowContext(ctx, getMessageIDByUID,
+		arg.AccountID,
+		arg.Folder,
+		arg.Uidvalidity,
+		arg.Uid,
+	)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
@@ -217,10 +249,10 @@ func (q *Queries) GetMessageWithBlob(ctx context.Context, id int64) (GetMessageW
 const insertMessage = `-- name: InsertMessage :exec
 INSERT INTO messages (
     account_id, folder, uid, blob_id, message_id_hdr, fuzzy_fp,
-    from_addr, to_addr, subject, internal_date, size
+    from_addr, to_addr, subject, internal_date, size, uidvalidity
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-ON CONFLICT(account_id, folder, uid) DO NOTHING
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+ON CONFLICT(account_id, folder, uidvalidity, uid) DO NOTHING
 `
 
 type InsertMessageParams struct {
@@ -235,10 +267,11 @@ type InsertMessageParams struct {
 	Subject      sql.NullString `json:"subject"`
 	InternalDate sql.NullString `json:"internal_date"`
 	Size         int64          `json:"size"`
+	Uidvalidity  int64          `json:"uidvalidity"`
 }
 
-// Idempotent per (account, folder, uid): re-processing the same message (e.g.
-// an aborted batch retried next run) does not create a duplicate row.
+// Idempotent per (account, folder, uidvalidity, uid): re-processing the same
+// message (e.g. an aborted batch retried next run) does not create a duplicate row.
 func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) error {
 	_, err := q.db.ExecContext(ctx, insertMessage,
 		arg.AccountID,
@@ -252,6 +285,7 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 		arg.Subject,
 		arg.InternalDate,
 		arg.Size,
+		arg.Uidvalidity,
 	)
 	return err
 }

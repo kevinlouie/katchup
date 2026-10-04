@@ -30,6 +30,12 @@ type AccountEncryption struct {
 	CreatedAt                 string         `json:"created_at"`
 }
 
+type AppSetting struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 type Blob struct {
 	ID        int64  `json:"id"`
 	AccountID int64  `json:"account_id"`
@@ -41,16 +47,18 @@ type Blob struct {
 }
 
 type FolderSyncState struct {
-	AccountID int64  `json:"account_id"`
-	Folder    string `json:"folder"`
-	LastUid   int64  `json:"last_uid"`
-	UpdatedAt string `json:"updated_at"`
+	AccountID   int64  `json:"account_id"`
+	Folder      string `json:"folder"`
+	LastUid     int64  `json:"last_uid"`
+	UpdatedAt   string `json:"updated_at"`
+	Uidvalidity int64  `json:"uidvalidity"`
 }
 
 type Message struct {
 	ID           int64          `json:"id"`
 	AccountID    int64          `json:"account_id"`
 	Folder       string         `json:"folder"`
+	Uidvalidity  int64          `json:"uidvalidity"`
 	Uid          int64          `json:"uid"`
 	BlobID       int64          `json:"blob_id"`
 	MessageIDHdr sql.NullString `json:"message_id_hdr"`

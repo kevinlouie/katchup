@@ -13,7 +13,9 @@ import (
 	"testing"
 
 	"katchup/internal/account"
+	migrations "katchup/sql/migrations"
 
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -49,86 +51,15 @@ func newTestHandler(t *testing.T) (*AccountHandler, func()) {
 	}
 }
 
+// createTestTables applies the real (embedded) migrations so handler tests
+// exercise the production schema rather than a hand-maintained copy.
 func createTestTables(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE accounts (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			host TEXT NOT NULL,
-			port INTEGER NOT NULL DEFAULT 993,
-			username TEXT NOT NULL,
-			encrypted_password TEXT NOT NULL,
-			use_ssl INTEGER NOT NULL DEFAULT 1,
-			folders TEXT NOT NULL DEFAULT 'INBOX',
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-		);
-
-		CREATE TABLE account_encryption (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			yubikey_slot_id TEXT NOT NULL,
-			slot_fingerprint TEXT NOT NULL,
-			encrypted_content_key_prefix TEXT,
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			UNIQUE(account_id)
-		);
-
-		CREATE TABLE sync_runs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			started_at TEXT NOT NULL,
-			finished_at TEXT,
-			emails_backed_up INTEGER NOT NULL DEFAULT 0,
-			errors TEXT,
-			status TEXT NOT NULL DEFAULT 'running',
-			last_uid INTEGER,
-			created_at TEXT NOT NULL DEFAULT (datetime('now'))
-		);
-
-		CREATE INDEX idx_sync_runs_account ON sync_runs(account_id, started_at DESC);
-
-		CREATE TABLE folder_sync_state (
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			folder TEXT NOT NULL,
-			last_uid INTEGER NOT NULL DEFAULT 0,
-			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-			PRIMARY KEY (account_id, folder)
-		);
-
-		CREATE TABLE blobs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			sha256 TEXT NOT NULL,
-			path TEXT NOT NULL,
-			size INTEGER NOT NULL,
-			refcount INTEGER NOT NULL DEFAULT 1,
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			UNIQUE(account_id, sha256)
-		);
-
-		CREATE TABLE messages (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			folder TEXT NOT NULL,
-			uid INTEGER NOT NULL,
-			blob_id INTEGER NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,
-			message_id_hdr TEXT,
-			fuzzy_fp TEXT,
-			from_addr TEXT,
-			to_addr TEXT,
-			subject TEXT,
-			internal_date TEXT,
-			size INTEGER NOT NULL DEFAULT 0,
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			UNIQUE(account_id, folder, uid)
-		);
-
-		CREATE INDEX idx_messages_msgid ON messages(account_id, message_id_hdr);
-		CREATE INDEX idx_messages_fuzzy ON messages(account_id, fuzzy_fp);
-		CREATE INDEX idx_messages_date  ON messages(account_id, internal_date DESC);
-	`)
-	return err
+	goose.SetBaseFS(migrations.FS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return err
+	}
+	return goose.Up(db, ".")
 }
 
 func TestListAccounts(t *testing.T) {
