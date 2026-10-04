@@ -25,13 +25,20 @@ import (
 
 const (
 	connectionTimeout = 30 * time.Second
-	fetchTimeout      = 120 * time.Second
-	fetchBatchSize    = 200
-	maxRetries        = 3
-	retryBaseDelay    = 1 * time.Second
-	maxErrors         = 5
-	maxErrorsLen      = 1000
-	staleRunAge       = 30 * time.Minute
+	// commandTimeout bounds every IMAP command except the body fetch (which has
+	// its own timer in syncFolder), so a silently dead connection fails the
+	// folder instead of wedging the run — and the per-account lock — forever.
+	commandTimeout = 2 * time.Minute
+	fetchTimeout   = 120 * time.Second
+	// maxRunDuration caps one sync run. Progress is persisted per batch, so a
+	// run cut off here resumes from its watermark on the next sync.
+	maxRunDuration = 6 * time.Hour
+	fetchBatchSize = 200
+	maxRetries     = 3
+	retryBaseDelay = 1 * time.Second
+	maxErrors      = 5
+	maxErrorsLen   = 1000
+	staleRunAge    = 30 * time.Minute
 )
 
 type Syncer struct {
@@ -367,6 +374,9 @@ func (s *Syncer) recentRunWithinWindow(ctx context.Context, accountID int64, win
 func (s *Syncer) executeSync(ctx context.Context, acct account.Account, syncRun account.SyncRun) error {
 	accountID := acct.ID
 
+	ctx, cancel := context.WithTimeout(ctx, maxRunDuration)
+	defer cancel()
+
 	s.logger.Info("starting sync run", "sync_run_id", syncRun.ID, "account_id", accountID, "account_name", acct.Name)
 
 	// Initialize encryption metadata if this is a new account
@@ -549,6 +559,9 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 		// library closes msgCh after UidFetch returns, so we must NOT close it.
 		msgCh := make(chan *imap.Message, end-start)
 		fetchDone := make(chan error, 1)
+		// The drain loop's timer bounds the fetch; c.Timeout would put a
+		// deadline on the whole batch transfer instead.
+		c.Timeout = 0
 		go func() { fetchDone <- c.UidFetch(uidSet, fetchItems, msgCh) }()
 
 		timer := time.NewTimer(fetchTimeout)
@@ -592,7 +605,9 @@ func (s *Syncer) syncFolder(ctx context.Context, acct account.Account, folder st
 			return safeWatermark, count, errs
 		}
 
-		if err := <-fetchDone; err != nil {
+		err := <-fetchDone
+		c.Timeout = commandTimeout
+		if err != nil {
 			errs = appendErr(errs, fmt.Sprintf("folder %s: fetch batch %d-%d: %v", folder, start, end, err))
 			return safeWatermark, count, errs
 		}
@@ -686,12 +701,15 @@ func (s *Syncer) loginPassword(acct account.Account) (string, error) {
 }
 
 func (s *Syncer) connectSSL(addr string, acct account.Account) (*client.Client, error) {
-	c, err := client.DialTLS(addr, &tls.Config{
+	// The dialer timeout also bounds the TLS handshake and server greeting.
+	dialer := &net.Dialer{Timeout: connectionTimeout}
+	c, err := client.DialWithDialerTLS(dialer, addr, &tls.Config{
 		ServerName: acct.Host,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dial TLS: %w", err)
 	}
+	c.Timeout = commandTimeout
 
 	password, err := s.loginPassword(acct)
 	if err != nil {
@@ -708,23 +726,20 @@ func (s *Syncer) connectSSL(addr string, acct account.Account) (*client.Client, 
 }
 
 func (s *Syncer) connectSTARTTLS(addr string, acct account.Account) (*client.Client, error) {
+	// The dialer timeout also bounds the server greeting.
 	dialer := &net.Dialer{
 		Timeout: connectionTimeout,
 	}
 
-	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	c, err := client.DialWithDialer(dialer, addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
+	c.Timeout = commandTimeout
 
 	// Pass ServerName so TLS validation works.
 	// Without it, StartTLS(nil) uses an empty ServerName and Go's
 	// crypto/tls rejects it with "either ServerName or InsecureSkipVerify".
-	c, err := client.New(conn)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("new client: %w", err)
-	}
 
 	if err := c.StartTLS(&tls.Config{
 		ServerName: acct.Host,
