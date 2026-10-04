@@ -286,7 +286,7 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	existing, err := h.store.GetAccount(ctx, id)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
 		}
@@ -306,7 +306,13 @@ func (h *AccountHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		errs = append(errs, "Username is required")
 	}
-	// Password is optional on update — blank keeps the stored one.
+	// Password is optional on update — blank keeps the stored one. Except when
+	// the server changes: otherwise anyone with UI access could point the
+	// account at a host they control and have katchup hand it the stored
+	// password at the next login.
+	if password == "" && host != existing.Host {
+		errs = append(errs, "Re-enter the password when changing the server")
+	}
 
 	// Parse port — default to 143 (STARTTLS), not 993.
 	port := int64(143)

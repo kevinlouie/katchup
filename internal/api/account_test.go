@@ -598,3 +598,44 @@ func TestUpdateAccountPreservesUnchanged(t *testing.T) {
 		t.Errorf("expected preserved host, got %q", updated.Host)
 	}
 }
+
+// TestUpdateAccountHostChangeNeedsPassword: repointing an account at another
+// server without re-entering the password is refused — otherwise UI access
+// alone would let someone have katchup send the stored password to a host
+// they control.
+func TestUpdateAccountHostChangeNeedsPassword(t *testing.T) {
+	handler, cleanup := newTestHandler(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	created, err := handler.store.CreateAccount(ctx, "Mail", "imap.real.com", 993, "me@real.com", "stored", true, []string{"INBOX"})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	update := func(password string) *httptest.ResponseRecorder {
+		form := url.Values{}
+		form.Set("name", "Mail")
+		form.Set("host", "imap.attacker.example")
+		form.Set("port", "993")
+		form.Set("username", "me@real.com")
+		form.Set("password", password)
+		form.Set("folders", "INBOX")
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/accounts/%d/edit", created.ID), strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		handler.Update(w, req)
+		return w
+	}
+
+	if w := update(""); w.Code == http.StatusSeeOther {
+		t.Fatal("host change without a password was accepted")
+	}
+	if got, _ := handler.store.GetAccount(ctx, created.ID); got.Host != "imap.real.com" {
+		t.Fatalf("host changed to %q without a password", got.Host)
+	}
+
+	if w := update("new-password"); w.Code != http.StatusSeeOther {
+		t.Fatalf("host change with a password: got %d, want 303", w.Code)
+	}
+}

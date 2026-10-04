@@ -239,6 +239,12 @@ sqlc-generated code lives in `internal/database/` — don't hand-edit it.
 - Login is rate-limited: 5 wrong keys within 15 minutes lock that client
   address out for 15 minutes. The limit keys on the TCP peer address, so behind
   a reverse proxy it applies to all clients of the proxy together.
+- **Treat the UI key like your mailbox passwords.** Anyone with it can read
+  and download all archived mail, and — since katchup holds working IMAP
+  credentials — could try to make katchup log in somewhere they control.
+  Changing an account's server requires re-entering its password, which closes
+  the obvious route, but a UI-key compromise should still be handled as a
+  mailbox-credential compromise: rotate the IMAP (app) passwords.
 - The `/api/*` surface is token-guarded (Bearer header only) and fails closed.
   The token also grants **read access to decrypted mail** via the MCP
   `get_message` tool — treat it like the UI key, and only point LLMs you trust
