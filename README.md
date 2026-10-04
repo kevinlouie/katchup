@@ -65,6 +65,15 @@ docker compose up -d
 open http://localhost:8080
 ```
 
+The archive (database + encrypted blobs) lives in the `katchup_data` named
+volume, which Docker creates owned by the container's non-root user. To keep
+it in a host directory instead, swap the volume for a bind mount in
+`docker-compose.yml` — the directory must exist and be writable by the
+container user: `mkdir data && sudo chown -R 100:101 data`, or add
+`user: "<uid>:<gid>"` to run as your own user. (Upgrading from a release that
+bind-mounted `./data`: keep that bind mount, it still works with the right
+ownership.)
+
 > ⚠️ **Back up `KATCHUP_MASTER_KEY` out of band.** It is derived (SHA-256) into
 > the key that unwraps every message and every stored IMAP password. **Lose it
 > and every `.eml.enc` file is permanently unrecoverable.** It is not stored in

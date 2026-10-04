@@ -16,7 +16,9 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata wget
 
-RUN addgroup -S app && adduser -S app -G app
+# Fixed uid/gid (the Alpine defaults, pinned) so a bind-mounted data dir can be
+# chowned to a known owner: `chown -R 100:101 ./data`.
+RUN addgroup -S -g 101 app && adduser -S -u 100 -G app app
 
 WORKDIR /app
 

@@ -35,6 +35,13 @@ func main() {
 	// Configure structured logging
 	configureLogger(cfg.Environment)
 
+	// Create the data dir up front: SQLite won't create missing parent
+	// directories, so a fresh checkout (`go run`) would otherwise fail to open.
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0700); err != nil {
+		slog.Error("failed to create data directory", "path", filepath.Dir(cfg.DBPath), "error", err)
+		os.Exit(1)
+	}
+
 	// Open SQLite database. modernc/sqlite applies _pragma to every new
 	// pooled connection — a plain `PRAGMA` Exec only reaches one connection.
 	db, err := sql.Open("sqlite", cfg.DBPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
